@@ -1145,6 +1145,11 @@ impl Executor {
                 )
             };
 
+        // ── RLS USING expression enforcement ─────────────────────────────────
+        // If the table has RLS enabled with SELECT-applicable USING expressions,
+        // parse + bind + AND them into effective_filter before materialisation.
+        let effective_filter = self.apply_rls_filter(effective_filter, schema, "SELECT");
+
         // Materialize any subqueries in filter/having.
         // materialize_subqueries now leaves correlated subqueries (containing OuterColumnRef)
         // in place — they will be handled per-row below.
@@ -1702,5 +1707,67 @@ impl Executor {
             }
         }
         Ok(())
+    }
+
+    /// Parse and bind RLS USING expressions for a table, ANDing them into `base_filter`.
+    /// Returns the updated filter. If no RLS policies are active, returns `base_filter` unchanged.
+    pub(crate) fn apply_rls_filter(
+        &self,
+        base_filter: Option<BoundExpr>,
+        schema: &TableSchema,
+        command: &str,
+    ) -> Option<BoundExpr> {
+        let using_exprs = self.rls_registry.get_using_exprs(&schema.name, command);
+        if using_exprs.is_empty() {
+            return base_filter;
+        }
+
+        // Parse and bind each USING expression SQL string.
+        let mut rls_pred: Option<BoundExpr> = None;
+        for sql_expr in using_exprs {
+            // Wrap in a SELECT to get a parseable statement, then extract the WHERE expr.
+            let wrapped = format!("SELECT 1 WHERE {sql_expr}");
+            let Ok(stmts) = falcon_sql_frontend::parser::parse_sql(&wrapped) else {
+                continue;
+            };
+            let ast_expr = match stmts.into_iter().next() {
+                Some(sqlparser::ast::Statement::Query(q)) => {
+                    match q.body.as_ref() {
+                        sqlparser::ast::SetExpr::Select(sel) => {
+                            sel.selection.clone()
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let Some(ast_expr) = ast_expr else { continue };
+
+            let catalog = self.storage.get_catalog();
+            let binder = falcon_sql_frontend::binder::Binder::new(catalog);
+            let Ok(bound_expr) = binder.bind_expr(&ast_expr, schema) else {
+                continue;
+            };
+
+            rls_pred = Some(match rls_pred {
+                None => bound_expr,
+                Some(existing) => BoundExpr::BinaryOp {
+                    left: Box::new(existing),
+                    op: BinOp::And,
+                    right: Box::new(bound_expr),
+                },
+            });
+        }
+
+        // AND the RLS predicate into the base filter.
+        match (base_filter, rls_pred) {
+            (None, rls) => rls,
+            (base, None) => base,
+            (Some(base), Some(rls)) => Some(BoundExpr::BinaryOp {
+                left: Box::new(base),
+                op: BinOp::And,
+                right: Box::new(rls),
+            }),
+        }
     }
 }

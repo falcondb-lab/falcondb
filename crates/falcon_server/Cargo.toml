@@ -46,5 +46,15 @@ lsm = ["falcon_storage/lsm"]
 rocksdb = ["falcon_storage/rocksdb"]
 redb = ["falcon_storage/redb"]
 
+# ── Edition profiles ──────────────────────────────────────────────────────────
+# cargo build --no-default-features --features community
+community  = ["falcon_storage/edition_community"]
+# cargo build --no-default-features --features standard
+standard   = ["falcon_storage/edition_standard"]
+# cargo build --no-default-features --features enterprise
+enterprise = ["falcon_storage/edition_enterprise"]
+# cargo build --no-default-features --features analytics
+analytics  = ["falcon_storage/edition_analytics"]
+
 [dev-dependencies]
 serde_json.workspace = true

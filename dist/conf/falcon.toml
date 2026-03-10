@@ -63,6 +63,10 @@ wal_enabled = true
 # Memory limit in bytes (0 = unlimited, uses available RAM).
 memory_limit_bytes = 0
 
+# Default table engine for CREATE TABLE (without ENGINE= clause).
+# rocksdb = persistent B-tree, PostgreSQL-compatible durability.
+default_engine = "rocksdb"
+
 # ── WAL ─────────────────────────────────────────────────────────────────────
 
 [wal]
@@ -75,6 +79,11 @@ flush_interval_us = 1000
 # Sync mode: "fsync", "fdatasync", or "none".
 # "fdatasync" is the recommended default for Windows + Linux.
 sync_mode = "fdatasync"
+
+# Durability policy: when is a commit considered durable.
+# "local-fsync" = durable after local WAL fsync (PostgreSQL default behavior).
+# "quorum-ack"  = durable only after quorum replication ack (distributed mode).
+durability_policy = "local-fsync"
 
 # Maximum WAL segment size before rotation (64 MB).
 segment_size_bytes = 67108864

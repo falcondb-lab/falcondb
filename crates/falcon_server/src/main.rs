@@ -339,8 +339,32 @@ async fn run_server_inner(
         config.replication.grpc_listen_addr = addr.clone();
     }
 
+    // Determine product edition and its preferred default storage engine.
+    let edition_name = {
+        #[cfg(feature = "enterprise")] { "Enterprise" }
+        #[cfg(all(feature = "analytics", not(feature = "enterprise")))] { "Analytics" }
+        #[cfg(all(feature = "standard", not(feature = "enterprise"), not(feature = "analytics")))] { "Standard" }
+        #[cfg(not(any(feature = "enterprise", feature = "analytics", feature = "standard")))] { "Community" }
+    };
+    falcon_common::globals::set_falcon_edition(edition_name.to_string());
+    tracing::info!(edition = edition_name, "FalconDB edition: {}", edition_name);
+
+    // Standard/Enterprise/Analytics editions default to RocksDB unless the user
+    // explicitly overrides storage.default_engine in falcon.toml.
+    let effective_engine = {
+        let cfg_engine = config.storage.default_engine.to_lowercase();
+        #[cfg(any(feature = "standard", feature = "enterprise", feature = "analytics"))]
+        if cfg_engine == "rowstore" {
+            // User has not customised the engine; apply edition default.
+            "rocksdb".to_string()
+        } else {
+            cfg_engine
+        }
+        #[cfg(not(any(feature = "standard", feature = "enterprise", feature = "analytics")))]
+        cfg_engine
+    };
     // Default table engine for CREATE TABLE without ENGINE=...
-    falcon_common::globals::set_default_table_engine(config.storage.default_engine.to_lowercase());
+    falcon_common::globals::set_default_table_engine(effective_engine);
 
     tracing::info!("Config: {:?}", config);
 
@@ -1581,6 +1605,33 @@ fn apply_engine_config(
             log_clone.append(record.clone());
         }));
         tracing::info!("WAL observer attached for primary replication");
+    }
+
+    if config.large_memory.enabled {
+        let (soft_bytes, hard_bytes) = {
+            let (ds, dh) = config.large_memory.derived_memory_limits();
+            let soft = if config.memory.shard_soft_limit_bytes > 0 {
+                config.memory.shard_soft_limit_bytes
+            } else {
+                ds
+            };
+            let hard = if config.memory.shard_hard_limit_bytes > 0 {
+                config.memory.shard_hard_limit_bytes
+            } else {
+                dh
+            };
+            (soft, hard)
+        };
+        engine.configure_large_memory(
+            true,
+            config.large_memory.dashmap_shards,
+            config.large_memory.initial_capacity_hint,
+            config.large_memory.skip_pk_order_on_insert,
+            config.large_memory.gc_interval_ms,
+            config.large_memory.gc_batch_size,
+            soft_bytes,
+            hard_bytes,
+        );
     }
 }
 

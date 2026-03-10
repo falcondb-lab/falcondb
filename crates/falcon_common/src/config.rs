@@ -66,6 +66,12 @@ pub struct FalconConfig {
     /// v1.3.0: Trigger support. Disabled by default to avoid DML fast-path overhead.
     #[serde(default)]
     pub triggers: TriggersConfig,
+    /// v1.3.0: Large-memory (>512 GB) rowstore optimizations — CockroachDB-parity tuning.
+    #[serde(default)]
+    pub large_memory: LargeMemoryConfig,
+    /// v1.4.0: Disk rowstore (B-tree persistent rowstore for Analytics nodes).
+    #[serde(default)]
+    pub disk_rowstore: DiskRowstoreConfig,
 }
 
 /// Trigger execution configuration.
@@ -1437,6 +1443,8 @@ impl Default for FalconConfig {
             cluster: ClusterSectionConfig::default(),
             resource_isolation: ResourceIsolationSectionConfig::default(),
             triggers: TriggersConfig::default(),
+            large_memory: LargeMemoryConfig::default(),
+            disk_rowstore: DiskRowstoreConfig::default(),
         }
     }
 }
@@ -1633,6 +1641,146 @@ impl DeprecatedFieldChecker {
                     )
                 })
                 .collect(),
+        }
+    }
+}
+
+/// Large-memory rowstore tuning for nodes with >512 GB RAM.
+///
+/// When `enabled = true`, FalconDB switches rowstore to a high-concurrency
+/// profile that matches CockroachDB's in-memory engine behaviour:
+///
+/// - DashMap internal shard count raised from 256 → `dashmap_shards` (default 4096)
+///   to eliminate hot-shard contention under hundreds of writer threads.
+/// - Initial DashMap capacity hint per table scaled to `initial_capacity_hint`
+///   (default 4M rows) — avoids rehash storms during bulk load.
+/// - `pk_order` BTreeSet is kept but its write lock is bypassed for blind INSERT
+///   paths when `skip_pk_order_on_insert = true` (default true); it is rebuilt
+///   lazily on the first range-scan.
+/// - GC sweep interval shortened to `gc_interval_ms` (default 200 ms) and
+///   batch lifted to `gc_batch_size` (default 512 k keys/sweep) so version
+///   chain memory is reclaimed quickly.
+/// - Soft memory limit auto-computed as 85 % of `node_memory_bytes` when that
+///   field is non-zero and `[memory].shard_soft_limit_bytes` is not set.
+/// - Hard memory limit auto-computed as 95 % of `node_memory_bytes`.
+///
+/// Example falcon.toml for a 1 TB machine:
+/// ```toml
+/// [large_memory]
+/// enabled = true
+/// node_memory_bytes = 1_099_511_627_776   # 1 TiB
+/// dashmap_shards = 4096
+/// initial_capacity_hint = 4_000_000
+/// skip_pk_order_on_insert = true
+/// gc_interval_ms = 200
+/// gc_batch_size = 524288
+/// txn_local_shards = 1024
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LargeMemoryConfig {
+    /// Enable large-memory mode. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Physical RAM of the node in bytes. Used to auto-derive memory limits.
+    /// 0 = disable auto-derivation.
+    #[serde(default)]
+    pub node_memory_bytes: u64,
+    /// DashMap internal shard count for rowstore MemTable.
+    /// Must be a power of 2. Default: 4096.
+    #[serde(default = "default_large_mem_dashmap_shards")]
+    pub dashmap_shards: usize,
+    /// Initial capacity hint (estimated max rows) per MemTable.
+    /// DashMap pre-allocates buckets to avoid rehash. Default: 4_000_000.
+    #[serde(default = "default_large_mem_capacity_hint")]
+    pub initial_capacity_hint: usize,
+    /// Skip updating pk_order BTreeSet on pure INSERT paths (no range scan needed).
+    /// The BTreeSet is rebuilt lazily when a range-scan is first issued.
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub skip_pk_order_on_insert: bool,
+    /// GC sweep interval in ms. Shorter = faster reclaim of version chains.
+    /// Default: 200 ms.
+    #[serde(default = "default_large_mem_gc_interval_ms")]
+    pub gc_interval_ms: u64,
+    /// Keys processed per GC sweep. 0 = unlimited. Default: 524288 (512 k).
+    #[serde(default = "default_large_mem_gc_batch")]
+    pub gc_batch_size: usize,
+    /// Number of internal shards for txn_local DashMap. Default: 1024.
+    #[serde(default = "default_large_mem_txn_shards")]
+    pub txn_local_shards: usize,
+    /// Soft memory limit as fraction of node_memory_bytes (0.0–1.0). Default: 0.85.
+    #[serde(default = "default_large_mem_soft_ratio")]
+    pub soft_limit_ratio: f64,
+    /// Hard memory limit as fraction of node_memory_bytes (0.0–1.0). Default: 0.95.
+    #[serde(default = "default_large_mem_hard_ratio")]
+    pub hard_limit_ratio: f64,
+}
+
+const fn default_large_mem_dashmap_shards() -> usize { 4096 }
+const fn default_large_mem_capacity_hint() -> usize { 4_000_000 }
+const fn default_large_mem_gc_interval_ms() -> u64 { 200 }
+const fn default_large_mem_gc_batch() -> usize { 524_288 }
+const fn default_large_mem_txn_shards() -> usize { 1024 }
+fn default_large_mem_soft_ratio() -> f64 { 0.85 }
+fn default_large_mem_hard_ratio() -> f64 { 0.95 }
+
+impl Default for LargeMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            node_memory_bytes: 0,
+            dashmap_shards: default_large_mem_dashmap_shards(),
+            initial_capacity_hint: default_large_mem_capacity_hint(),
+            skip_pk_order_on_insert: true,
+            gc_interval_ms: default_large_mem_gc_interval_ms(),
+            gc_batch_size: default_large_mem_gc_batch(),
+            txn_local_shards: default_large_mem_txn_shards(),
+            soft_limit_ratio: default_large_mem_soft_ratio(),
+            hard_limit_ratio: default_large_mem_hard_ratio(),
+        }
+    }
+}
+
+impl LargeMemoryConfig {
+    /// Derive soft/hard memory limits from node_memory_bytes.
+    /// Returns (soft_bytes, hard_bytes). Returns (0,0) if disabled or node_memory_bytes == 0.
+    pub fn derived_memory_limits(&self) -> (u64, u64) {
+        if !self.enabled || self.node_memory_bytes == 0 {
+            return (0, 0);
+        }
+        let soft = (self.node_memory_bytes as f64 * self.soft_limit_ratio) as u64;
+        let hard = (self.node_memory_bytes as f64 * self.hard_limit_ratio) as u64;
+        (soft, hard)
+    }
+}
+
+/// Configuration for the disk rowstore engine (Analytics node persistent B-tree rowstore).
+///
+/// ## Example falcon.toml
+/// ```toml
+/// [disk_rowstore]
+/// buffer_pool_pages = 4096
+/// data_dir = "./falcon_data/disk_rowstore"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskRowstoreConfig {
+    /// Number of pages in the buffer pool per table. Each page is 8 KiB.
+    /// Default: 1024 pages (8 MiB per table).
+    #[serde(default = "default_disk_rs_buffer_pool_pages")]
+    pub buffer_pool_pages: usize,
+    /// Override data directory for disk rowstore table files.
+    /// Default: "" (uses storage.data_dir/disk_rowstore).
+    #[serde(default)]
+    pub data_dir: String,
+}
+
+const fn default_disk_rs_buffer_pool_pages() -> usize { 1024 }
+
+impl Default for DiskRowstoreConfig {
+    fn default() -> Self {
+        Self {
+            buffer_pool_pages: default_disk_rs_buffer_pool_pages(),
+            data_dir: String::new(),
         }
     }
 }

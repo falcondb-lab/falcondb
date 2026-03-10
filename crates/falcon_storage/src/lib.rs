@@ -70,6 +70,8 @@ pub mod lsm_table;
 pub mod redb_table;
 #[cfg(feature = "rocksdb")]
 pub mod rocksdb_table;
+#[cfg(feature = "rocksdb")]
+pub mod rocksdb_engine;
 
 // ── Stub for columnstore so engine.rs compiles without the feature ──
 #[cfg(not(feature = "columnstore"))]

@@ -1995,6 +1995,7 @@ mod planner_tests {
             let bound = BoundStatement::CreateTable(falcon_sql_frontend::types::BoundCreateTable {
                 schema,
                 if_not_exists: false,
+                partition_spec: None,
             });
             let stats = TableStatsMap::new();
             let indexes = IndexedColumns::new();

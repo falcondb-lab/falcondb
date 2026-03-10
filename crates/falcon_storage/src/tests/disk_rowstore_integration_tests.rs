@@ -48,19 +48,12 @@ fn test_disk_rowstore_insert_and_scan_via_engine() {
     engine.create_table(disk_schema()).unwrap();
 
     engine
-        .insert(
-            TableId(600),
-            OwnedRow::new(vec![Datum::Int64(1), Datum::Text("a".into())]),
-            TxnId(1),
-        )
+        .insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("a".into())]), TxnId(1))
         .unwrap();
     engine
-        .insert(
-            TableId(600),
-            OwnedRow::new(vec![Datum::Int64(2), Datum::Text("b".into())]),
-            TxnId(1),
-        )
+        .insert(TableId(600), OwnedRow::new(vec![Datum::Int64(2), Datum::Text("b".into())]), TxnId(1))
         .unwrap();
+    engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
 
     let rows = engine.scan(TableId(600), TxnId(2), Timestamp(100)).unwrap();
     assert_eq!(rows.len(), 2);
@@ -72,20 +65,14 @@ fn test_disk_rowstore_update_via_engine() {
     engine.create_table(disk_schema()).unwrap();
 
     let pk = engine
-        .insert(
-            TableId(600),
-            OwnedRow::new(vec![Datum::Int64(1), Datum::Text("old".into())]),
-            TxnId(1),
-        )
+        .insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("old".into())]), TxnId(1))
         .unwrap();
+    engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+
     engine
-        .update(
-            TableId(600),
-            &pk,
-            OwnedRow::new(vec![Datum::Int64(1), Datum::Text("new".into())]),
-            TxnId(2),
-        )
+        .update(TableId(600), &pk, OwnedRow::new(vec![Datum::Int64(1), Datum::Text("new".into())]), TxnId(2))
         .unwrap();
+    engine.commit_txn(TxnId(2), Timestamp(20), TxnType::Local).unwrap();
 
     let rows = engine.scan(TableId(600), TxnId(3), Timestamp(100)).unwrap();
     assert_eq!(rows.len(), 1);
@@ -98,38 +85,32 @@ fn test_disk_rowstore_delete_via_engine() {
     engine.create_table(disk_schema()).unwrap();
 
     let pk = engine
-        .insert(
-            TableId(600),
-            OwnedRow::new(vec![Datum::Int64(1), Datum::Text("gone".into())]),
-            TxnId(1),
-        )
+        .insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("gone".into())]), TxnId(1))
         .unwrap();
+    engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+
     engine.delete(TableId(600), &pk, TxnId(2)).unwrap();
+    engine.commit_txn(TxnId(2), Timestamp(20), TxnType::Local).unwrap();
 
     let rows = engine.scan(TableId(600), TxnId(3), Timestamp(100)).unwrap();
     assert_eq!(rows.len(), 0, "deleted row must not appear in scan");
 }
 
 #[test]
-fn test_disk_rowstore_scan_ignores_read_ts() {
-    // DiskRowstore has no MVCC —read_ts is accepted but not used for versioning
+fn test_disk_rowstore_scan_visibility_after_commit() {
     let engine = analytics_engine();
     engine.create_table(disk_schema()).unwrap();
 
     engine
-        .insert(
-            TableId(600),
-            OwnedRow::new(vec![Datum::Int64(1), Datum::Text("x".into())]),
-            TxnId(1),
-        )
+        .insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("x".into())]), TxnId(1))
         .unwrap();
+    engine.commit_txn(TxnId(1), Timestamp(5), TxnType::Local).unwrap();
 
-    let rows_ts0 = engine.scan(TableId(600), TxnId(2), Timestamp(0)).unwrap();
-    let rows_tsmax = engine
-        .scan(TableId(600), TxnId(2), Timestamp(u64::MAX))
-        .unwrap();
-    assert_eq!(rows_ts0.len(), 1, "DiskRowstore: row visible at ts=0");
-    assert_eq!(rows_tsmax.len(), 1, "DiskRowstore: row visible at ts=MAX");
+    // Row committed at ts=5, visible at ts>=5, not at ts<5
+    let rows_before = engine.scan(TableId(600), TxnId(2), Timestamp(4)).unwrap();
+    let rows_after = engine.scan(TableId(600), TxnId(2), Timestamp(100)).unwrap();
+    assert_eq!(rows_before.len(), 0, "row not yet committed at ts=4");
+    assert_eq!(rows_after.len(), 1, "row visible at ts=100");
 }
 
 #[test]
@@ -139,11 +120,10 @@ fn test_disk_rowstore_duplicate_key_rejected() {
 
     let row = OwnedRow::new(vec![Datum::Int64(42), Datum::Text("dup".into())]);
     engine.insert(TableId(600), row.clone(), TxnId(1)).unwrap();
+    engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
+    // After commit the key is in pk_index, second insert from different txn must fail
     let result = engine.insert(TableId(600), row, TxnId(2));
-    assert!(
-        result.is_err(),
-        "duplicate PK must be rejected by DiskRowstore"
-    );
+    assert!(result.is_err(), "duplicate PK must be rejected by DiskRowstore");
 }
 
 #[test]
@@ -159,30 +139,22 @@ fn test_disk_rowstore_not_allowed_on_primary() {
 }
 
 #[test]
-fn test_disk_rowstore_commit_does_not_affect_visibility() {
-    // DiskRowstore rows are immediately visible —commit is a no-op for visibility
+fn test_disk_rowstore_pending_not_visible_to_others() {
+    // Uncommitted writes are not visible to other transactions
     let engine = analytics_engine();
     engine.create_table(disk_schema()).unwrap();
 
     engine
-        .insert(
-            TableId(600),
-            OwnedRow::new(vec![Datum::Int64(1), Datum::Text("y".into())]),
-            TxnId(1),
-        )
+        .insert(TableId(600), OwnedRow::new(vec![Datum::Int64(1), Datum::Text("y".into())]), TxnId(1))
         .unwrap();
 
-    let before = engine
-        .scan(TableId(600), TxnId(99), Timestamp(100))
-        .unwrap();
-    assert_eq!(before.len(), 1);
+    // Before commit: other txns cannot see the row
+    let before = engine.scan(TableId(600), TxnId(99), Timestamp(100)).unwrap();
+    assert_eq!(before.len(), 0, "pending write must not be visible to other txns");
 
-    engine
-        .commit_txn(TxnId(1), Timestamp(10), TxnType::Local)
-        .unwrap();
+    engine.commit_txn(TxnId(1), Timestamp(10), TxnType::Local).unwrap();
 
-    let after = engine
-        .scan(TableId(600), TxnId(99), Timestamp(100))
-        .unwrap();
-    assert_eq!(after.len(), 1);
+    // After commit: visible at ts >= commit_ts
+    let after = engine.scan(TableId(600), TxnId(99), Timestamp(100)).unwrap();
+    assert_eq!(after.len(), 1, "committed row must be visible");
 }

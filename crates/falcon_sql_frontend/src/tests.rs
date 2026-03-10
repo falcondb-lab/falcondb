@@ -1953,4 +1953,51 @@ mod new_feature_tests {
             _ => panic!("Expected Select"),
         }
     }
+
+    #[test]
+    fn test_sqlparser_partition_by_range() {
+        use crate::parser::parse_sql;
+        use sqlparser::ast::Statement;
+        let sql = "CREATE TABLE orders (id INT PRIMARY KEY, order_date DATE, amount DECIMAL) \
+                   PARTITION BY RANGE (order_date)";
+        let stmts = parse_sql(sql).unwrap();
+        if let Statement::CreateTable(ct) = &stmts[0] {
+            let pb = ct.partition_by.as_ref().expect("partition_by should be Some");
+            let s = format!("{pb}");
+            assert!(s.to_uppercase().contains("RANGE"), "got: {s}");
+        } else {
+            panic!("expected CreateTable");
+        }
+    }
+
+    #[test]
+    fn test_sqlparser_partition_by_list() {
+        use crate::parser::parse_sql;
+        use sqlparser::ast::Statement;
+        let sql = "CREATE TABLE orders (id INT PRIMARY KEY, region TEXT) \
+                   PARTITION BY LIST (region)";
+        let stmts = parse_sql(sql).unwrap();
+        if let Statement::CreateTable(ct) = &stmts[0] {
+            let pb = ct.partition_by.as_ref().expect("partition_by should be Some");
+            let s = format!("{pb}");
+            assert!(s.to_uppercase().contains("LIST"), "got: {s}");
+        } else {
+            panic!("expected CreateTable");
+        }
+    }
+
+    #[test]
+    fn test_sqlparser_partition_by_hash() {
+        use crate::parser::parse_sql;
+        use sqlparser::ast::Statement;
+        let sql = "CREATE TABLE orders (id INT PRIMARY KEY) PARTITION BY HASH (id)";
+        let stmts = parse_sql(sql).unwrap();
+        if let Statement::CreateTable(ct) = &stmts[0] {
+            let pb = ct.partition_by.as_ref().expect("partition_by should be Some");
+            let s = format!("{pb}");
+            assert!(s.to_uppercase().contains("HASH"), "got: {s}");
+        } else {
+            panic!("expected CreateTable");
+        }
+    }
 }

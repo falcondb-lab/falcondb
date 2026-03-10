@@ -31,6 +31,7 @@ method = "trust"
 data_dir = "/var/lib/falcondb"
 wal_enabled = true
 memory_limit_bytes = 0
+default_engine = "rocksdb"
 
 # ── WAL ─────────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,7 @@ memory_limit_bytes = 0
 group_commit = true
 flush_interval_us = 1000
 sync_mode = "fdatasync"
+durability_policy = "local-fsync"
 segment_size_bytes = 67108864
 
 # ── Replication ─────────────────────────────────────────────────────────────

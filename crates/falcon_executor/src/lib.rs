@@ -1,5 +1,6 @@
 #[path = "eval/mod.rs"]
 pub mod eval;
+pub mod enterprise;
 pub mod executor;
 mod executor_aggregate;
 mod executor_columnar;

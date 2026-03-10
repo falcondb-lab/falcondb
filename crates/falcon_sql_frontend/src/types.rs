@@ -269,12 +269,95 @@ pub enum BoundStatement {
     ShowBackupStatus,
     /// SHOW AI STATS — returns AI optimizer diagnostics
     ShowAiStats,
+    /// SHOW AIOPS STATS — AIOps engine summary
+    ShowAiopsStats,
+    /// SHOW AIOPS ALERTS — recent anomaly alerts
+    ShowAiopsAlerts,
+    /// SHOW AIOPS INDEX ADVICE — index recommendations
+    ShowAiopsIndexAdvice,
+    /// SHOW AIOPS WORKLOAD — top workload fingerprints
+    ShowAiopsWorkload,
+    /// SHOW AIOPS SLOW QUERIES — recent slow query log
+    ShowAiopsSlowQueries,
+    /// SHOW MEMORY PROFILE — large-memory mode diagnostics
+    ShowMemoryProfile,
+
+    // ── Row Level Security ──────────────────────────────────────────────────
+    /// ALTER TABLE <name> ENABLE ROW LEVEL SECURITY
+    AlterTableEnableRls {
+        table_name: String,
+        enable: bool,
+    },
+    /// CREATE POLICY <name> ON <table> [AS PERMISSIVE|RESTRICTIVE]
+    /// [FOR ALL|SELECT|INSERT|UPDATE|DELETE]
+    /// [USING (<expr>)] [WITH CHECK (<expr>)]
+    CreatePolicy {
+        policy_name: String,
+        table_name: String,
+        command: String,       // "ALL" | "SELECT" | "INSERT" | "UPDATE" | "DELETE"
+        permissive: bool,
+        using_expr: Option<String>,
+        check_expr: Option<String>,
+    },
+    /// DROP POLICY [IF EXISTS] <name> ON <table>
+    DropPolicy {
+        policy_name: String,
+        table_name: String,
+        if_exists: bool,
+    },
+    /// SHOW POLICIES [ON <table>]
+    ShowPolicies {
+        table_name: Option<String>,
+    },
+
+    // ── Logical Replication Slots ───────────────────────────────────────────
+    /// SELECT pg_create_logical_replication_slot('<name>', '<plugin>')
+    /// or CREATE REPLICATION SLOT <name> LOGICAL <plugin>
+    CreateReplicationSlot {
+        slot_name: String,
+        plugin: String,
+    },
+    /// DROP REPLICATION SLOT <name>
+    DropReplicationSlot {
+        slot_name: String,
+    },
+    /// SHOW REPLICATION SLOTS
+    ShowReplicationSlots,
+
+    // ── DML Audit ───────────────────────────────────────────────────────────
+    /// SHOW AUDIT LOG [LIMIT <n>]
+    ShowAuditLog {
+        limit: usize,
+    },
+    /// SHOW AUDIT LOG FOR TABLE <name>
+    ShowAuditLogForTable {
+        table_name: String,
+        limit: usize,
+    },
+}
+
+/// Partitioning strategy resolved from PARTITION BY clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartitionStrategy {
+    Range,
+    List,
+    Hash,
+}
+
+/// Resolved partition spec from CREATE TABLE ... PARTITION BY.
+#[derive(Debug, Clone)]
+pub struct BoundPartitionSpec {
+    pub strategy: PartitionStrategy,
+    /// Column name used as the partition key.
+    pub key_column: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct BoundCreateTable {
     pub schema: TableSchema,
     pub if_not_exists: bool,
+    /// Set when the table has a PARTITION BY clause.
+    pub partition_spec: Option<BoundPartitionSpec>,
 }
 
 #[derive(Debug, Clone)]

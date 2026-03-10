@@ -16,7 +16,7 @@
   <a href="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml">
     <img src="https://github.com/falcondb-lab/falcondb/actions/workflows/ci.yml/badge.svg" alt="CI" />
   </a>
-  <img src="https://img.shields.io/badge/version-1.3.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.2.0-blue" alt="Version" />
   <img src="https://img.shields.io/badge/MSRV-1.75-blue" alt="MSRV" />
   <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License" />
 </p>
@@ -93,9 +93,9 @@ It is not a configuration option — it is the default behavior under the `Local
 | **Functions** | 500+ scalar functions (string, math, date/time, crypto, JSON, array) |
 | **Observability** | SHOW falcon.*, EXPLAIN, EXPLAIN ANALYZE, CHECKPOINT, ANALYZE TABLE, pg_stat_statements |
 
-### <a id="not-supported"></a>Not Supported (v1.3)
+### <a id="not-supported"></a>Not Supported (v1.2)
 
-The following features are **explicitly out of scope** for v1.3.
+The following features are **explicitly out of scope** for v1.2.
 Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLSTATE code.
 
 | Feature | Error Code | Error Message |
@@ -113,6 +113,8 @@ Attempting to use them returns a clear `ErrorResponse` with the appropriate SQLS
 > **Scope Guard**: Full HTAP analytics pipeline is in progress. ColumnStore
 > storage and vectorized GROUP BY AGG pushdown are implemented. Raft consensus
 > is available via `replication.role = "raft_member"` (see [ARCHITECTURE.md](ARCHITECTURE.md) §2.7).
+>
+> **Standard Edition**: The Standard edition uses RocksDB as the default storage engine — disk-first, distributed, and fully PostgreSQL compatible. Deploy with `--features standard` or `cargo build --features edition_standard`.
 
 ### Optional / Non-Default Features (implemented, not on default build path)
 
@@ -644,6 +646,158 @@ executor.ai_optimizer.import_weights(weights);
 
 ---
 
+## AIOps Engine
+
+FalconDB includes a built-in **AIOps (Autonomous Database Operations)** engine that runs entirely in-process with no external dependencies. It automatically monitors query behavior, detects anomalies, and provides actionable recommendations — all accessible via SQL.
+
+### Four Subsystems
+
+#### 1. Slow Query Detector
+
+Adaptive threshold based on an **EMA p95 baseline** — not a static timeout.
+
+- Initial floor: 100 ms (absolute minimum to flag)
+- Adaptive threshold: `max(100ms, ema_p95 × 2.0)` — tightens as workload normalizes
+- Warms up after 100 samples; uses absolute floor during warm-up
+- Retains the 200 most recent slow query records (rolling)
+- Records truncated original SQL text (first 200 chars) and table name per entry
+
+#### 2. Anomaly Detector
+
+**Welford online variance** (3σ rule) on two independent signals:
+
+| Signal | Description |
+|--------|-------------|
+| TPS | Per-second query throughput |
+| Latency | Per-second average query duration (µs) |
+
+- Requires ≥ 30 per-second observations to activate (no cold-start false positives)
+- Fires `WARNING` on TPS spikes or latency anomalies
+- Fires `CRITICAL` when latency exceeds 5× the running mean
+- Fires `WARNING` when ≥ 5 **consecutive** slow queries are detected (source: `AnomalyDetector/SlowQuery`)
+- Retains 500 most recent alerts (rolling)
+
+#### 3. Index Advisor
+
+Tracks **full-scan events** tagged by table name:
+
+- Fires a recommendation when a table accumulates ≥ 10 full scans with avg duration ≥ 50 ms
+- Identifies top-3 filter columns from WHERE clause usage patterns
+- Generates a ready-to-run `CREATE INDEX` statement
+- Ranks recommendations by impact score (`full_scan_count × avg_duration_us`)
+
+#### 4. Workload Profiler
+
+Per-query **fingerprint aggregation** (normalized SQL, first 120 chars):
+
+- Tracks: call count, total/avg/max latency, **p95/p99** (reservoir sampling, 100 samples), error rate per fingerprint
+- Supports up to 1000 distinct fingerprints
+- Top-N queries by total time or call count for capacity planning
+
+### SQL Interface
+
+```sql
+-- AIOps engine summary (12 metrics)
+SHOW AIOPS STATS;
+
+-- Recent anomaly alerts (up to 50, most recent first)
+SHOW AIOPS ALERTS;
+
+-- Index recommendations ranked by impact
+SHOW AIOPS INDEX ADVICE;
+
+-- Top 20 query fingerprints by total execution time (with p95/p99)
+SHOW AIOPS WORKLOAD;
+
+-- Recent slow queries (up to 100, newest first) with SQL text
+SHOW AIOPS SLOW QUERIES;
+```
+
+#### `SHOW AIOPS STATS` output
+
+| metric | description |
+|--------|-------------|
+| `slow_query_samples` | Total queries processed by slow query detector |
+| `slow_query_threshold_us` | Current adaptive slow query threshold (µs) |
+| `slow_query_ema_baseline_us` | EMA p95 baseline used for threshold calculation |
+| `slow_query_logged` | Number of slow queries in rolling buffer |
+| `anomaly_tps_mean` | Running mean TPS |
+| `anomaly_tps_stddev` | Running TPS standard deviation |
+| `anomaly_latency_mean_us` | Running mean latency (µs) |
+| `anomaly_latency_stddev_us` | Running latency standard deviation |
+| `anomaly_alerts_total` | Total anomaly alerts fired |
+| `index_advisor_tables_tracked` | Tables with full-scan history |
+| `index_advisor_advice_count` | Active index recommendations |
+| `workload_fingerprints` | Distinct query shapes tracked |
+
+#### `SHOW AIOPS ALERTS` output
+
+| column | description |
+|--------|-------------|
+| `id` | Monotonically increasing alert ID |
+| `ts_unix_ms` | Alert timestamp (Unix ms) |
+| `severity` | `WARNING` or `CRITICAL` |
+| `source` | `AnomalyDetector/TPS` or `AnomalyDetector/Latency` |
+| `message` | Human-readable description with observed vs. baseline values |
+
+#### `SHOW AIOPS INDEX ADVICE` output
+
+| column | description |
+|--------|-------------|
+| `table_name` | Table with frequent full scans |
+| `full_scan_count` | Number of full scans recorded |
+| `avg_scan_duration_us` | Average full scan duration (µs) |
+| `column_hints` | Top filter columns from WHERE clauses |
+| `suggestion` | Ready-to-run `CREATE INDEX` statement |
+
+#### `SHOW AIOPS WORKLOAD` output
+
+| column | description |
+|--------|-------------|
+| `fingerprint` | Normalized SQL fingerprint (first 120 chars) |
+| `call_count` | Total invocation count |
+| `avg_us` | Average execution time (µs) |
+| `p95_us` | p95 latency estimate (reservoir sampling) |
+| `p99_us` | p99 latency estimate (reservoir sampling) |
+| `max_us` | Maximum observed execution time (µs) |
+| `total_us` | Total CPU time consumed (µs) |
+| `error_count` | Number of executions that returned an error |
+
+#### `SHOW AIOPS SLOW QUERIES` output
+
+| column | description |
+|--------|-------------|
+| `ts_unix_ms` | When the slow query was detected (Unix ms) |
+| `duration_us` | Actual execution time (µs) |
+| `threshold_us` | Adaptive threshold at time of detection (µs) |
+| `plan_kind` | Physical plan type (e.g. `SeqScan`, `IndexScan`) |
+| `table_name` | Primary table scanned |
+| `sql_text` | Truncated original SQL (first 200 chars) |
+
+### Data Flow
+
+```
+Every query execution (Executor::execute)
+        │
+        ├─ SlowQueryDetector.record(fingerprint, duration_us, plan_kind)
+        │       └─ updates EMA baseline, appends to rolling buffer if slow
+        │
+        ├─ AnomalyDetector.record(duration_us)
+        │       └─ per-second TPS+latency accumulation → Welford update → 3σ alert
+        │
+        ├─ IndexAdvisor.record_full_scan(table, duration_us, filter_cols)
+        │       └─ only for SeqScan plans; increments per-table accumulators
+        │
+        └─ WorkloadProfiler.record(sql, duration_us, is_error)
+                └─ normalizes fingerprint, updates per-fingerprint stats
+```
+
+### Integration Point
+
+The AIOps engine uses a **global singleton** (`global_aiops()`) shared across all executor instances in a process, so statistics accumulate across sessions without any configuration.
+
+---
+
 ## Architecture
 
 ```
@@ -778,15 +932,15 @@ cargo build --workspace
 
 ## Roadmap
 
-All milestones through v1.3 are released. Current test count: **4,380+** across 18 crates (432 `.rs` files, ~246K lines of Rust).
+All milestones through v1.2 are released. Current test count: **4,200+** across 18 crates (417 `.rs` files).
 
 | Milestone | Highlights |
 |-----------|------------|
 | **v0.1–v0.9** ✅ | OLTP foundation, WAL, failover, gRPC, security, chaos-hardening |
 | **v1.0** ✅ | LSM engine, SQL completeness, enterprise features (RLS/TDE/PITR/CDC), distributed hardening |
 | **v1.0.1–v1.0.3** ✅ | Zero-panic, failover×txn matrix, determinism & trust hardening |
-| **v1.1–v1.2** ✅ | USTM tiered memory, fused streaming aggregates, near-PG query parity |
-| **v1.3** ✅ | PL/pgSQL triggers (CREATE/DROP TRIGGER, BEFORE/AFTER, FOR EACH ROW/STATEMENT), Spring Boot / JDBC compatibility improvements, ColumnStore GC & truncate, `CREATE TYPE ... AS ENUM` custom enum types, AI optimizer integration (online SGD cost model, `SHOW AI STATS`) |
+| **v1.1** ✅ | USTM tiered memory, fused streaming aggregates, near-PG query parity |
+| **v1.2** ✅ | Standard edition (RocksDB default engine), edition feature flags, PL/pgSQL triggers, ColumnStore GC & truncate, `CREATE TYPE ... AS ENUM`, AI optimizer (online SGD, `SHOW AI STATS`), RocksDB GC flush + checkpoint replica sync |
 
 ### RPO / RTO
 
@@ -800,6 +954,7 @@ and `sync-replica` (primary waits for replica WAL ack, RPO ≈ 0). See [docs/rpo
 | Document | Description |
 |----------|-------------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture, crate structure, data flow |
+| [ARCHITECTURE_zh.md](ARCHITECTURE_zh.md) | 系统架构文档（中文） |
 | [docs/INSTALL.md](docs/INSTALL.md) | Installation & uninstall (Windows + Linux) |
 | [docs/UPGRADE.md](docs/UPGRADE.md) | Upgrade, rolling upgrade & version management |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Service management, monitoring, config management |
@@ -820,6 +975,7 @@ and `sync-replica` (primary waits for replica WAL ack, RPO ≈ 0). See [docs/rpo
 | [docs/design/](docs/design/) | Design docs: MVCC, WAL, sharding, vectorized exec |
 | [docs/adr/](docs/adr/) | Architecture Decision Records (ADR-001–007) |
 | [CHANGELOG.md](CHANGELOG.md) | Semantic versioning changelog (v0.1–v1.2) |
+| [README_CN.md](README_CN.md) | 中文用户手册 |
 
 ---
 
@@ -839,6 +995,94 @@ cargo test -p falcon_common    # 250+ tests
 # Lint
 cargo clippy --workspace       # must be 0 warnings
 ```
+
+---
+
+## Enterprise Features (PostgreSQL Enterprise Parity)
+
+FalconDB implements PostgreSQL Enterprise-equivalent capabilities when using RocksDB as the storage engine. All features are accessible via standard SQL — no external services required.
+
+### Row Level Security (RLS)
+
+```sql
+-- Enable RLS on a table
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+
+-- Create a policy: each user sees only their own rows
+CREATE POLICY tenant_isolation ON orders
+  FOR SELECT
+  USING (tenant_id = current_user);
+
+-- Restrictive policy (all policies must pass)
+CREATE POLICY write_guard ON orders
+  AS RESTRICTIVE
+  FOR INSERT
+  WITH CHECK (status = 'pending');
+
+-- Drop a policy
+DROP POLICY tenant_isolation ON orders;
+
+-- Inspect policies
+SHOW POLICIES ON orders;
+-- columns: table_name, policy_name, command, permissive, using_expr, check_expr, rls_enabled
+
+-- Disable RLS
+ALTER TABLE orders DISABLE ROW LEVEL SECURITY;
+```
+
+### Logical Replication Slots
+
+```sql
+-- Create a logical replication slot (compatible with pg_logical / pgoutput)
+CREATE REPLICATION SLOT my_slot LOGICAL pgoutput;
+-- Returns: slot_name, plugin, confirmed_flush_lsn
+
+-- List all slots
+SHOW REPLICATION SLOTS;
+-- columns: slot_name, plugin, confirmed_flush_lsn, restart_lsn, active, created_at_unix_ms
+
+-- Drop a slot
+DROP REPLICATION SLOT my_slot;
+```
+
+### DML Audit Log
+
+The executor maintains an in-process ring buffer (capacity 4096) of audit events, recorded for every DML operation.
+
+```sql
+-- Show most recent 100 audit events
+SHOW AUDIT LOG;
+
+-- Show last 50 events
+SHOW AUDIT LOG LIMIT 50;
+
+-- Filter by table name (matches events whose SQL references the table)
+SHOW AUDIT LOG FOR TABLE orders LIMIT 20;
+-- columns: event_id, timestamp_ms, event_type, role_name, detail, sql, success
+```
+
+### RocksDB Enterprise Storage Engine
+
+When compiled with `--features rocksdb`, the `rocksdb_engine.rs` backend provides:
+
+| Feature | Implementation |
+|---------|---------------|
+| **Column Family isolation** | System CF / user-data CF / secondary-index CF / TTL CF |
+| **Tiered compression** | LZ4 for L0–L2 (hot), Zstd for L3+ (cold) |
+| **TTL / Row Expiry** | RocksDB `CompactionFilter` on TTL CF, key-encoded expiry timestamp |
+| **Secondary indexes** | Dedicated index CF, index-only scan path |
+| **TDE hooks** | `encryption.rs` AES-256-GCM DEK integration point for RocksDB Env |
+| **MVCC** | Per-PK shard locks, atomic commit/abort batches, version chain encoding |
+
+### Online DDL
+
+```sql
+-- Monitor progress of background schema changes
+SHOW DDL STATUS;
+-- columns: id, operation, phase, table_id, rows_processed, rows_total, elapsed_ms, error
+```
+
+Phases: `pending → running → backfilling → completed` (metadata-only ops skip to `completed` immediately).
 
 ---
 

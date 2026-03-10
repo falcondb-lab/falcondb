@@ -46,9 +46,6 @@ use crate::pitr::WalArchiver;
 use crate::resource_isolation::ResourceIsolator;
 use crate::tenant_registry::TenantRegistry;
 
-// ── Feature-gated storage engine imports ──
-#[cfg(feature = "disk_rowstore")]
-use crate::disk_rowstore::DiskRowstoreTable;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TxnWriteOp {
@@ -432,6 +429,21 @@ impl Default for EnterpriseExtensions {
 
 static ENGINE_ID_GEN: AtomicU64 = AtomicU64::new(1);
 
+/// Snapshot returned by `StorageEngine::memory_profile_snapshot()`.
+pub struct LargeMemoryProfileSnapshot {
+    pub large_mem_enabled: bool,
+    pub dashmap_shards: usize,
+    pub capacity_hint: usize,
+    pub skip_pk_order: bool,
+    pub gc_interval_ms: u64,
+    pub gc_batch_size: usize,
+    pub soft_limit_bytes: u64,
+    pub hard_limit_bytes: u64,
+    pub used_bytes: u64,
+    pub pressure_state: String,
+    pub table_count: usize,
+}
+
 /// The storage engine. Owns all tables (rowstore, columnstore, disk), the catalog, and the WAL.
 pub struct StorageEngine {
     pub(crate) engine_id: u64,
@@ -522,6 +534,13 @@ pub struct StorageEngine {
     /// Monotonic DDL epoch — bumped on every CREATE/DROP/ALTER/TRUNCATE.
     /// Used by the thread-local TABLE_CACHE in engine_dml to invalidate stale entries.
     pub(crate) ddl_epoch: AtomicU64,
+    /// v1.3.0: Large-memory (>512 GB) rowstore optimizations — CockroachDB-parity tuning.
+    pub(crate) large_mem_dashmap_shards: usize,
+    pub(crate) large_mem_capacity_hint: usize,
+    pub(crate) large_mem_skip_pk_order: bool,
+    pub(crate) large_mem_enabled: bool,
+    /// Partition metadata registry — tracks PARTITION BY definitions and routes DML.
+    pub(crate) partition_manager: parking_lot::RwLock<crate::partition::PartitionManager>,
 }
 
 impl StorageEngine {
@@ -687,6 +706,11 @@ impl StorageEngine {
             self_weak: parking_lot::RwLock::new(std::sync::Weak::new()),
             ext: EnterpriseExtensions::default(),
             ddl_epoch: AtomicU64::new(0),
+            large_mem_dashmap_shards: 256,
+            large_mem_capacity_hint: 1 << 20,
+            large_mem_skip_pk_order: false,
+            large_mem_enabled: false,
+            partition_manager: parking_lot::RwLock::new(crate::partition::PartitionManager::new()),
         }
     }
 
@@ -699,6 +723,46 @@ impl StorageEngine {
         engine.data_dir = wal_dir.map(std::path::Path::to_path_buf);
         engine.wal = wal;
         Ok(engine)
+    }
+
+    /// Register a partitioned table definition (from CREATE TABLE ... PARTITION BY).
+    pub fn register_partitioned_table(&self, def: crate::partition::PartitionedTableDef) {
+        self.partition_manager.write().create_partitioned_table(def);
+    }
+
+    /// Check if a table has a PARTITION BY definition.
+    pub fn is_partitioned(&self, table_id: falcon_common::types::TableId) -> bool {
+        self.partition_manager.read().is_partitioned(table_id)
+    }
+
+    /// Add a partition to an already-registered partitioned table.
+    /// Used by CREATE TABLE PARTITION OF / ALTER TABLE ATTACH PARTITION DDL.
+    pub fn add_partition_to_table(
+        &self,
+        parent_id: falcon_common::types::TableId,
+        name: String,
+        child_table_id: falcon_common::types::TableId,
+        bound: crate::partition::PartitionBound,
+    ) -> Option<crate::partition::PartitionId> {
+        self.partition_manager.write().add_partition(parent_id, name, child_table_id, bound)
+    }
+
+    /// Route a key value to the child partition TableId for DML.
+    /// Returns None if the table is not partitioned or no matching partition found.
+    pub fn route_partition(
+        &self,
+        parent_id: falcon_common::types::TableId,
+        key_value: &falcon_common::datum::Datum,
+    ) -> Option<falcon_common::types::TableId> {
+        self.partition_manager.read().route(parent_id, key_value)
+    }
+
+    /// Get the partition key column index for a partitioned table.
+    pub fn partition_key_idx(&self, parent_id: falcon_common::types::TableId) -> Option<usize> {
+        self.partition_manager
+            .read()
+            .get_def(parent_id)
+            .map(|d| d.partition_key_idx)
     }
 
     /// Register a weak back-reference to the Arc wrapping this engine.
@@ -1448,6 +1512,73 @@ impl StorageEngine {
         self.ext.resource_isolator.stats()
     }
 
+    /// Apply large-memory rowstore optimizations from [large_memory] config section.
+    /// Must be called before any tables are created (at startup, before DDL).
+    /// When enabled:
+    ///   - New rowstore MemTables use `dashmap_shards` internal shards (vs default 256)
+    ///   - Initial capacity pre-allocated to `capacity_hint` rows per table
+    ///   - pk_order BTreeSet updates skipped on INSERT hot path (rebuilt lazily on scan)
+    ///   - GC sweep interval and batch tuned for fast version chain reclaim
+    ///   - Memory budget derived from node_memory_bytes if not explicitly set
+    pub fn configure_large_memory(
+        &mut self,
+        enabled: bool,
+        dashmap_shards: usize,
+        capacity_hint: usize,
+        skip_pk_order: bool,
+        gc_interval_ms: u64,
+        gc_batch_size: usize,
+        soft_bytes: u64,
+        hard_bytes: u64,
+    ) {
+        if !enabled {
+            return;
+        }
+        self.large_mem_enabled = true;
+        self.large_mem_dashmap_shards = dashmap_shards.next_power_of_two().max(256);
+        self.large_mem_capacity_hint = capacity_hint;
+        self.large_mem_skip_pk_order = skip_pk_order;
+
+        self.gc_config.interval_ms = gc_interval_ms;
+        self.gc_config.batch_size = gc_batch_size;
+        self.gc_config.max_chain_length = 16;
+
+        if soft_bytes > 0 && hard_bytes > 0 {
+            let budget = MemoryBudget::new(soft_bytes, hard_bytes);
+            self.set_memory_budget(budget);
+        }
+
+        tracing::info!(
+            shards = self.large_mem_dashmap_shards,
+            capacity_hint,
+            skip_pk_order,
+            gc_interval_ms,
+            gc_batch_size,
+            soft_bytes,
+            hard_bytes,
+            "Large-memory rowstore mode enabled"
+        );
+    }
+
+    /// Return a snapshot of large-memory mode configuration and current memory stats.
+    /// Used by `SHOW MEMORY PROFILE`.
+    pub fn memory_profile_snapshot(&self) -> LargeMemoryProfileSnapshot {
+        let mem = self.memory_tracker.snapshot();
+        LargeMemoryProfileSnapshot {
+            large_mem_enabled: self.large_mem_enabled,
+            dashmap_shards: self.large_mem_dashmap_shards,
+            capacity_hint: self.large_mem_capacity_hint,
+            skip_pk_order: self.large_mem_skip_pk_order,
+            gc_interval_ms: self.gc_config.interval_ms,
+            gc_batch_size: self.gc_config.batch_size,
+            soft_limit_bytes: mem.soft_limit,
+            hard_limit_bytes: mem.hard_limit,
+            used_bytes: mem.total_bytes,
+            pressure_state: mem.pressure_state.to_string(),
+            table_count: self.engine_tables.len(),
+        }
+    }
+
     /// Set the node role. Must be called before any DML.
     pub const fn set_node_role(&mut self, role: NodeRole) {
         self.node_role = role;
@@ -2148,13 +2279,17 @@ impl StorageEngine {
                                     table
                                         .committed_row_count
                                         .fetch_add(1, AtomicOrdering::Relaxed);
-                                    table.pk_order.write().insert(op.pk.clone());
+                                    if !table.large_mem_mode {
+                                        table.pk_order.write().insert(op.pk.clone());
+                                    }
                                 }
                                 -1 => {
                                     table
                                         .committed_row_count
                                         .fetch_sub(1, AtomicOrdering::Relaxed);
-                                    table.pk_order.write().remove(&op.pk);
+                                    if !table.large_mem_mode {
+                                        table.pk_order.write().remove(&op.pk);
+                                    }
                                 }
                                 _ => {}
                             }
@@ -2608,13 +2743,17 @@ impl StorageEngine {
                                 table
                                     .committed_row_count
                                     .fetch_add(1, AtomicOrdering::Relaxed);
-                                table.pk_order.write().insert(op.pk.clone());
+                                if !table.large_mem_mode {
+                                    table.pk_order.write().insert(op.pk.clone());
+                                }
                             }
                             -1 => {
                                 table
                                     .committed_row_count
                                     .fetch_sub(1, AtomicOrdering::Relaxed);
-                                table.pk_order.write().remove(&op.pk);
+                                if !table.large_mem_mode {
+                                    table.pk_order.write().remove(&op.pk);
+                                }
                             }
                             _ => {}
                         }
@@ -2955,6 +3094,18 @@ impl StorageEngine {
                 aggregate.reclaimed_versions += purged as u64;
                 continue;
             }
+            #[cfg(feature = "disk_rowstore")]
+            if let crate::table_handle::TableHandle::DiskRowstore(dt) = entry.value() {
+                dt.gc_mvcc(watermark);
+                continue;
+            }
+            #[cfg(feature = "rocksdb")]
+            if let crate::table_handle::TableHandle::RocksDb(rdb) = entry.value() {
+                // Aborted versions are already removed inline during commit_batch.
+                // Flush memtable so compaction can reclaim space from deleted keys.
+                let _ = rdb.flush();
+                continue;
+            }
             let Some(memtable) = entry.value().as_rowstore() else {
                 continue;
             };
@@ -3204,6 +3355,39 @@ impl StorageEngine {
                         *table_id,
                         crate::table_handle::TableHandle::Columnstore(cs),
                     );
+                    continue;
+                }
+                #[cfg(feature = "rocksdb")]
+                if schema.storage_type == falcon_common::schema::StorageType::RocksDbRowstore {
+                    let data_dir = self
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    let rdb_dir = data_dir.join(format!("rocksdb_table_{}", table_id.0));
+                    match crate::rocksdb_table::RocksDbTable::open(schema.clone(), &rdb_dir) {
+                        Ok(rdb) => {
+                            let sentinel_txn = TxnId(0);
+                            let sentinel_ts = Timestamp(1);
+                            for (pk, row) in rows {
+                                let data = bincode::serialize(row)
+                                    .unwrap_or_default();
+                                let mv = crate::lsm::mvcc_encoding::MvccValue::committed(
+                                    sentinel_txn,
+                                    sentinel_ts,
+                                    data,
+                                );
+                                let _ = rdb.insert_committed(pk, &mv);
+                            }
+                            let rdb = std::sync::Arc::new(rdb);
+                            self.engine_tables.insert(
+                                *table_id,
+                                crate::table_handle::TableHandle::RocksDb(Arc::clone(&rdb)),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("apply_checkpoint_data: failed to open RocksDB for table {:?}: {}", table_id, e);
+                        }
+                    }
                     continue;
                 }
                 let memtable = Arc::new(MemTable::new(schema));

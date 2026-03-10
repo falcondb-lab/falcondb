@@ -492,8 +492,23 @@ impl LogicalPlan {
             | BoundStatement::ShowBackupStatus
             | BoundStatement::CreateType { .. }
             | BoundStatement::DropType { .. }
-            | BoundStatement::ShowAiStats => Err(falcon_common::error::SqlError::Unsupported(
-                "Backup/Job/Type/AI commands use legacy planner path".into(),
+            | BoundStatement::ShowAiStats
+            | BoundStatement::ShowAiopsStats
+            | BoundStatement::ShowAiopsAlerts
+            | BoundStatement::ShowAiopsIndexAdvice
+            | BoundStatement::ShowAiopsWorkload
+            | BoundStatement::ShowAiopsSlowQueries
+            | BoundStatement::ShowMemoryProfile
+            | BoundStatement::AlterTableEnableRls { .. }
+            | BoundStatement::CreatePolicy { .. }
+            | BoundStatement::DropPolicy { .. }
+            | BoundStatement::ShowPolicies { .. }
+            | BoundStatement::CreateReplicationSlot { .. }
+            | BoundStatement::DropReplicationSlot { .. }
+            | BoundStatement::ShowReplicationSlots
+            | BoundStatement::ShowAuditLog { .. }
+            | BoundStatement::ShowAuditLogForTable { .. } => Err(falcon_common::error::SqlError::Unsupported(
+                "Backup/Job/Type/AI/AIOps/Enterprise commands use legacy planner path".into(),
             )),
         }
     }

@@ -598,7 +598,16 @@ impl StorageEngine {
         // Now create engine table and add to catalog
         match schema.storage_type {
             StorageType::Rowstore => {
-                let table = Arc::new(MemTable::new(schema.clone()));
+                let table = if self.large_mem_enabled {
+                    Arc::new(MemTable::new_large_mem(
+                        schema.clone(),
+                        self.large_mem_dashmap_shards,
+                        self.large_mem_capacity_hint,
+                        self.large_mem_skip_pk_order,
+                    ))
+                } else {
+                    Arc::new(MemTable::new(schema.clone()))
+                };
                 table.ensure_gin_indexes();
                 self.engine_tables
                     .insert(table_id, crate::table_handle::TableHandle::Rowstore(table));
@@ -762,7 +771,16 @@ impl StorageEngine {
         // Replace with an empty table of the appropriate storage type
         match schema.storage_type {
             StorageType::Rowstore => {
-                let table = Arc::new(MemTable::new(schema));
+                let table = if self.large_mem_enabled {
+                    Arc::new(MemTable::new_large_mem(
+                        schema,
+                        self.large_mem_dashmap_shards,
+                        self.large_mem_capacity_hint,
+                        self.large_mem_skip_pk_order,
+                    ))
+                } else {
+                    Arc::new(MemTable::new(schema))
+                };
                 table.ensure_gin_indexes();
                 self.engine_tables
                     .insert(table_id, crate::table_handle::TableHandle::Rowstore(table));

@@ -23,6 +23,23 @@ use falcon_common::error::StorageError;
 use falcon_common::schema::TableSchema;
 use falcon_common::types::{TableId, Timestamp, TxnId};
 
+// ---------------------------------------------------------------------------
+// MVCC version layer
+// ---------------------------------------------------------------------------
+
+/// A single version of a row in the MVCC chain.
+#[derive(Clone)]
+struct DiskVersion {
+    txn_id: TxnId,
+    /// None = tombstone (DELETE)
+    row: Option<OwnedRow>,
+    /// Set to Some(ts) after commit; None while pending.
+    commit_ts: Option<Timestamp>,
+}
+
+/// Per-key version chain (newest first).
+type VersionChain = VecDeque<DiskVersion>;
+
 pub const PAGE_SIZE: usize = 8192;
 pub const DEFAULT_BUFFER_POOL_PAGES: usize = 1024;
 pub type PageId = u64;
@@ -419,6 +436,9 @@ pub struct DiskRowstoreTable {
     first_leaf: RwLock<PageId>,
     rows_written: AtomicU64,
     rows_deleted: AtomicU64,
+    /// MVCC overlay: uncommitted + recent committed versions, keyed by PK.
+    /// Committed versions are flushed to disk pages; pending versions live here only.
+    mvcc: RwLock<BTreeMap<Vec<u8>, VersionChain>>,
 }
 
 impl DiskRowstoreTable {
@@ -438,6 +458,7 @@ impl DiskRowstoreTable {
             first_leaf: RwLock::new(first_leaf),
             rows_written: AtomicU64::new(0),
             rows_deleted: AtomicU64::new(0),
+            mvcc: RwLock::new(BTreeMap::new()),
         };
 
         if root != 0 {
@@ -453,6 +474,132 @@ impl DiskRowstoreTable {
         let tmp_dir = std::env::temp_dir().join(format!("falcon_disk_rs_{id}"));
         std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
         Self::new(schema, &tmp_dir)
+    }
+
+    // ── MVCC helpers ─────────────────────────────────────────────────────────
+
+    /// Write a pending (uncommitted) version for a key.
+    fn mvcc_write(&self, pk: Vec<u8>, txn_id: TxnId, row: Option<OwnedRow>) {
+        let mut mvcc = self.mvcc.write();
+        let chain = mvcc.entry(pk).or_default();
+        chain.push_front(DiskVersion { txn_id, row, commit_ts: None });
+    }
+
+    /// Commit all versions belonging to `txn_id` with `commit_ts`.
+    /// Committed INSERTs/UPDATEs are flushed to the B-tree; DELETEs remove from index.
+    pub fn commit_mvcc(&self, txn_id: TxnId, commit_ts: Timestamp) {
+        let mut mvcc = self.mvcc.write();
+        let mut to_flush: Vec<(Vec<u8>, Option<OwnedRow>)> = Vec::new();
+        for (pk, chain) in mvcc.iter_mut() {
+            for ver in chain.iter_mut() {
+                if ver.txn_id == txn_id && ver.commit_ts.is_none() {
+                    ver.commit_ts = Some(commit_ts);
+                    to_flush.push((pk.clone(), ver.row.clone()));
+                }
+            }
+        }
+        drop(mvcc);
+        for (pk, row_opt) in to_flush {
+            match row_opt {
+                Some(row) => {
+                    // Upsert into B-tree (delete old slot if exists, then insert)
+                    let _ = self.btree_delete(&pk);
+                    let _ = self.btree_insert(pk, row);
+                }
+                None => {
+                    // Tombstone — remove from B-tree
+                    let _ = self.btree_delete(&pk);
+                }
+            }
+        }
+    }
+
+    /// Abort all pending versions for `txn_id` (drop without applying).
+    pub fn abort_mvcc(&self, txn_id: TxnId) {
+        let mut mvcc = self.mvcc.write();
+        for chain in mvcc.values_mut() {
+            chain.retain(|v| !(v.txn_id == txn_id && v.commit_ts.is_none()));
+        }
+        mvcc.retain(|_, chain| !chain.is_empty());
+    }
+
+    /// Read the visible version of `pk` at `read_ts`.
+    /// Returns the latest committed version with commit_ts <= read_ts,
+    /// or falls back to the B-tree page data if no MVCC entry exists.
+    pub fn mvcc_get(&self, pk: &[u8], txn_id: TxnId, read_ts: Timestamp) -> Option<OwnedRow> {
+        let mvcc = self.mvcc.read();
+        if let Some(chain) = mvcc.get(pk) {
+            // Own uncommitted write is visible to itself
+            for ver in chain.iter() {
+                if ver.txn_id == txn_id && ver.commit_ts.is_none() {
+                    return ver.row.clone();
+                }
+            }
+            // Latest committed version at or before read_ts
+            for ver in chain.iter() {
+                if let Some(cts) = ver.commit_ts {
+                    if cts.0 <= read_ts.0 {
+                        return ver.row.clone();
+                    }
+                }
+            }
+        }
+        drop(mvcc);
+        // Fallback: B-tree has the committed baseline
+        self.btree_get(pk)
+    }
+
+    /// GC: remove all committed versions older than `watermark` (keeping 1 per key).
+    pub fn gc_mvcc(&self, watermark: Timestamp) {
+        let mut mvcc = self.mvcc.write();
+        for chain in mvcc.values_mut() {
+            let mut keep_one = false;
+            chain.retain(|v| {
+                if v.commit_ts.is_none() {
+                    return true; // keep pending
+                }
+                let ts = v.commit_ts.unwrap();
+                if ts.0 <= watermark.0 {
+                    if !keep_one {
+                        keep_one = true;
+                        return true; // keep the newest below watermark
+                    }
+                    return false;
+                }
+                true
+            });
+        }
+        mvcc.retain(|_, chain| !chain.is_empty());
+    }
+
+    // ── B-tree helpers (raw, no MVCC) ────────────────────────────────────────
+
+    fn btree_insert(&self, pk: Vec<u8>, row: OwnedRow) -> Result<(), StorageError> {
+        let (path, leaf_id) = self.find_leaf_path(&pk);
+        let mut leaf = self
+            .pool
+            .fetch_page(leaf_id)
+            .ok_or_else(|| StorageError::Serialization("leaf page missing".into()))?;
+        if leaf.leaf_try_append(&pk, &row) {
+            let slot_idx = leaf.leaf_slot_count() - 1;
+            self.pool.put_page(leaf);
+            self.pk_index.write().insert(pk, (leaf_id, slot_idx));
+            self.rows_written.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+        self.split_and_insert(path, leaf_id, &pk, &row)?;
+        self.rows_written.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn btree_delete(&self, pk: &[u8]) -> Result<(), StorageError> {
+        let mut idx = self.pk_index.write();
+        if idx.remove(pk).is_some() {
+            self.rows_deleted.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        } else {
+            Err(StorageError::KeyNotFound)
+        }
     }
 
     pub fn table_id(&self) -> TableId {
@@ -484,7 +631,7 @@ impl DiskRowstoreTable {
         if r != 0 {
             return r;
         }
-        drop(r);
+        let _ = r;
 
         // Allocate meta page if needed
         let _meta_id = self.pool.allocate_page(); // page 1 = meta
@@ -567,34 +714,16 @@ impl DiskRowstoreTable {
         }
     }
 
-    pub fn insert(&self, row: OwnedRow, _txn_id: TxnId) -> Result<Vec<u8>, StorageError> {
+    pub fn insert(&self, row: OwnedRow, txn_id: TxnId) -> Result<Vec<u8>, StorageError> {
         let pk = crate::memtable::encode_pk(&row, self.schema.pk_indices());
-
+        // Reject duplicate only if committed (pending writes from other txns are invisible)
         {
             let idx = self.pk_index.read();
             if idx.contains_key(&pk) {
                 return Err(StorageError::DuplicateKey);
             }
         }
-
-        let (path, leaf_id) = self.find_leaf_path(&pk);
-        let mut leaf = self
-            .pool
-            .fetch_page(leaf_id)
-            .ok_or_else(|| StorageError::Serialization("leaf page missing".into()))?;
-
-        if leaf.leaf_try_append(&pk, &row) {
-            let slot_idx = leaf.leaf_slot_count() - 1;
-            self.pool.put_page(leaf);
-            self.pk_index
-                .write()
-                .insert(pk.clone(), (leaf_id, slot_idx));
-            self.rows_written.fetch_add(1, Ordering::Relaxed);
-            return Ok(pk);
-        }
-
-        // Leaf full → split
-        self.split_and_insert(path, leaf_id, &pk, &row)?;
+        self.mvcc_write(pk.clone(), txn_id, Some(row));
         Ok(pk)
     }
 
@@ -727,7 +856,7 @@ impl DiskRowstoreTable {
         }
     }
 
-    pub fn get(&self, pk: &[u8], _txn_id: TxnId, _read_ts: Timestamp) -> Option<OwnedRow> {
+    fn btree_get(&self, pk: &[u8]) -> Option<OwnedRow> {
         let idx = self.pk_index.read();
         let &(page_id, slot_idx) = idx.get(pk)?;
         let page = self.pool.fetch_page(page_id)?;
@@ -735,47 +864,93 @@ impl DiskRowstoreTable {
         rows.get(slot_idx).map(|(_, row)| row.clone())
     }
 
-    pub fn delete(&self, pk: &[u8], _txn_id: TxnId) -> Result<(), StorageError> {
-        let mut idx = self.pk_index.write();
-        if idx.remove(pk).is_some() {
-            self.rows_deleted.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        } else {
-            Err(StorageError::KeyNotFound)
-        }
+    pub fn get(&self, pk: &[u8], txn_id: TxnId, read_ts: Timestamp) -> Option<OwnedRow> {
+        self.mvcc_get(pk, txn_id, read_ts)
     }
 
-    pub fn update(&self, pk: &[u8], new_row: OwnedRow, txn_id: TxnId) -> Result<(), StorageError> {
-        self.delete(pk, txn_id)?;
-        self.insert(new_row, txn_id)?;
+    pub fn delete(&self, pk: &[u8], txn_id: TxnId) -> Result<(), StorageError> {
+        // Key must exist (committed) or be pending from same txn
+        let exists_committed = self.pk_index.read().contains_key(pk);
+        let exists_pending = {
+            let mvcc = self.mvcc.read();
+            mvcc.get(pk).map_or(false, |c| c.iter().any(|v| v.txn_id == txn_id && v.commit_ts.is_none() && v.row.is_some()))
+        };
+        if !exists_committed && !exists_pending {
+            return Err(StorageError::KeyNotFound);
+        }
+        self.mvcc_write(pk.to_vec(), txn_id, None);
         Ok(())
     }
 
-    /// Sequential scan via leaf chain.
-    pub fn scan(&self, _txn_id: TxnId, _read_ts: Timestamp) -> Vec<(Vec<u8>, OwnedRow)> {
+    pub fn update(&self, pk: &[u8], new_row: OwnedRow, txn_id: TxnId) -> Result<(), StorageError> {
+        // Overwrite: write a new version (tombstone old implicitly via same-key commit upsert)
+        self.mvcc_write(pk.to_vec(), txn_id, Some(new_row));
+        Ok(())
+    }
+
+    /// Sequential scan via leaf chain, applying MVCC visibility at `read_ts`.
+    pub fn scan(&self, txn_id: TxnId, read_ts: Timestamp) -> Vec<(Vec<u8>, OwnedRow)> {
+        // Collect committed baseline from B-tree
         let idx = self.pk_index.read();
         let mut leaf_id = *self.first_leaf.read();
-        let mut results = Vec::new();
-
+        let mut base: BTreeMap<Vec<u8>, OwnedRow> = BTreeMap::new();
         while leaf_id != 0 {
             if let Some(page) = self.pool.fetch_page(leaf_id) {
-                if page.page_type() != PAGE_TYPE_LEAF {
-                    break;
-                }
+                if page.page_type() != PAGE_TYPE_LEAF { break; }
                 for (slot, (pk, row)) in page.leaf_read_rows().into_iter().enumerate() {
-                    // Only include live rows (index points here)
                     if let Some(&(ip, is)) = idx.get(&pk) {
                         if ip == leaf_id && is == slot {
-                            results.push((pk, row));
+                            base.insert(pk, row);
                         }
                     }
                 }
                 leaf_id = page.next_leaf();
-            } else {
-                break;
+            } else { break; }
+        }
+        drop(idx);
+
+        // Apply MVCC overlay: own pending writes + committed versions at read_ts.
+        // Also: if the MVCC chain's newest committed version is > read_ts, the B-tree
+        // baseline (which stores the latest committed state) is "too new" and must be hidden.
+        let mvcc = self.mvcc.read();
+        for (pk, chain) in mvcc.iter() {
+            // Own uncommitted write is always visible to itself
+            let own_pending = chain.iter().find(|v| v.txn_id == txn_id && v.commit_ts.is_none());
+            if let Some(ver) = own_pending {
+                match &ver.row {
+                    Some(r) => { base.insert(pk.clone(), r.clone()); }
+                    None => { base.remove(pk); }
+                }
+                continue;
+            }
+            // Find the latest committed version at or before read_ts
+            let visible = chain.iter().find(|v| {
+                v.commit_ts.map_or(false, |ts| ts.0 <= read_ts.0)
+            });
+            // Find if there is a committed version newer than read_ts (B-tree may have it)
+            let has_newer = chain.iter().any(|v| {
+                v.commit_ts.map_or(false, |ts| ts.0 > read_ts.0)
+            });
+            if has_newer {
+                // B-tree stores the latest committed state which is newer than read_ts.
+                // Replace with the correct version at read_ts (or remove if none exists).
+                match visible {
+                    Some(ver) => match &ver.row {
+                        Some(r) => { base.insert(pk.clone(), r.clone()); }
+                        None => { base.remove(pk); }
+                    },
+                    None => { base.remove(pk); }
+                }
+            } else if let Some(ver) = visible {
+                // B-tree baseline is already correct; only apply overlay delta
+                match &ver.row {
+                    Some(r) => { base.insert(pk.clone(), r.clone()); }
+                    None => { base.remove(pk); }
+                }
             }
         }
-        results
+        drop(mvcc);
+        base.into_iter().collect()
     }
 
     /// Range scan: return rows with pk in [start, end).
@@ -901,7 +1076,7 @@ impl crate::storage_trait::StorageTable for DiskRowstoreTable {
         txn_id: TxnId,
         read_ts: Timestamp,
     ) -> Result<Option<OwnedRow>, StorageError> {
-        Ok(DiskRowstoreTable::get(self, pk, txn_id, read_ts))
+        Ok(DiskRowstoreTable::mvcc_get(self, pk, txn_id, read_ts))
     }
     fn scan(
         &self,
@@ -913,12 +1088,15 @@ impl crate::storage_trait::StorageTable for DiskRowstoreTable {
     fn commit_key(
         &self,
         _pk: &crate::memtable::PrimaryKey,
-        _txn_id: TxnId,
-        _commit_ts: Timestamp,
+        txn_id: TxnId,
+        commit_ts: Timestamp,
     ) -> Result<(), StorageError> {
+        self.commit_mvcc(txn_id, commit_ts);
         Ok(())
     }
-    fn abort_key(&self, _pk: &crate::memtable::PrimaryKey, _txn_id: TxnId) {}
+    fn abort_key(&self, _pk: &crate::memtable::PrimaryKey, txn_id: TxnId) {
+        self.abort_mvcc(txn_id);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,14 +1208,16 @@ mod tests {
         let txn = TxnId(1);
         let row = OwnedRow::new(vec![Datum::Int64(1), Datum::Text("a".into())]);
         table.insert(row.clone(), txn).unwrap();
-        assert!(table.insert(row, txn).is_err());
+        // Commit so the key is visible in pk_index
+        table.commit_mvcc(txn, Timestamp(1));
+        // Now a second insert with a different txn should be rejected
+        assert!(table.insert(row, TxnId(2)).is_err());
     }
 
     #[test]
     fn test_page_split_many_rows() {
         let table = DiskRowstoreTable::new_in_memory(test_schema()).unwrap();
         let txn = TxnId(1);
-        // Insert enough rows to trigger multiple page splits
         for i in 0..200 {
             table
                 .insert(
@@ -1046,23 +1226,18 @@ mod tests {
                 )
                 .unwrap();
         }
-        let rows = table.scan(txn, Timestamp(100));
+        // Commit to flush into B-tree pages
+        table.commit_mvcc(txn, Timestamp(1));
+        let rows = table.scan(TxnId(99), Timestamp(100));
         assert_eq!(rows.len(), 200, "all 200 rows must survive page splits");
-        assert!(
-            table.stats().leaf_pages > 1,
-            "should have split into multiple leaves"
-        );
+        assert!(table.stats().leaf_pages > 1, "should have split into multiple leaves");
 
-        // Verify point lookup still works after splits
         for i in [0, 50, 100, 150, 199] {
             let pk = crate::memtable::encode_pk(
                 &OwnedRow::new(vec![Datum::Int64(i), Datum::Text(String::new())]),
                 &[0],
             );
-            assert!(
-                table.get(&pk, txn, Timestamp(100)).is_some(),
-                "pk lookup failed for {i}"
-            );
+            assert!(table.get(&pk, TxnId(99), Timestamp(100)).is_some(), "pk lookup failed for {i}");
         }
     }
 
@@ -1071,16 +1246,10 @@ mod tests {
         let table = DiskRowstoreTable::new_in_memory(test_schema()).unwrap();
         let txn = TxnId(1);
         assert_eq!(table.tree_depth(), 0, "empty tree has depth 0");
-        table
-            .insert(
-                OwnedRow::new(vec![Datum::Int64(1), Datum::Text("x".into())]),
-                txn,
-            )
-            .unwrap();
-        assert!(
-            table.tree_depth() >= 2,
-            "after insert: root(internal) → leaf"
-        );
+        table.insert(OwnedRow::new(vec![Datum::Int64(1), Datum::Text("x".into())]), txn).unwrap();
+        // Commit to flush into B-tree pages
+        table.commit_mvcc(txn, Timestamp(1));
+        assert!(table.tree_depth() >= 2, "after commit: root(internal) → leaf");
     }
 
     #[test]
@@ -1095,7 +1264,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        // Range scan [10, 20)
+        table.commit_mvcc(txn, Timestamp(1));
         let start = crate::memtable::encode_pk(
             &OwnedRow::new(vec![Datum::Int64(10), Datum::Text(String::new())]),
             &[0],
@@ -1104,7 +1273,7 @@ mod tests {
             &OwnedRow::new(vec![Datum::Int64(20), Datum::Text(String::new())]),
             &[0],
         );
-        let results = table.range_scan(&start, &end, txn, Timestamp(100));
+        let results = table.range_scan(&start, &end, TxnId(99), Timestamp(100));
         assert_eq!(results.len(), 10, "range [10,20) should have 10 rows");
     }
 
@@ -1120,6 +1289,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        table.commit_mvcc(txn, Timestamp(1));
         // Walk the leaf chain and count
         let mut leaf_id = *table.first_leaf.read();
         let mut leaf_count = 0;

@@ -6,6 +6,7 @@ static DEFAULT_TABLE_ENGINE: OnceLock<String> = OnceLock::new();
 static NODE_ROLE: OnceLock<String> = OnceLock::new();
 static SERVER_START_INSTANT: OnceLock<Instant> = OnceLock::new();
 static SERVER_START_EPOCH_MS: OnceLock<i64> = OnceLock::new();
+static FALCON_EDITION: OnceLock<String> = OnceLock::new();
 
 /// Global database-level statistics (pg_stat_database compatible).
 pub struct DbStats {
@@ -63,6 +64,18 @@ pub fn default_table_engine() -> &'static str {
         .get()
         .map(|s| s.as_str())
         .unwrap_or("rowstore")
+}
+
+pub fn set_falcon_edition(edition: String) {
+    let _ = FALCON_EDITION.set(edition);
+}
+
+/// Returns the product edition name: "Community", "Standard", "Enterprise", "Analytics".
+pub fn falcon_edition() -> &'static str {
+    FALCON_EDITION
+        .get()
+        .map(|s| s.as_str())
+        .unwrap_or("Community")
 }
 
 pub fn set_node_role(role: String) {

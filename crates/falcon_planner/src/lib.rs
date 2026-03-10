@@ -1,4 +1,5 @@
 pub mod ai_optimizer;
+pub mod aiops;
 pub mod cost;
 pub mod logical_plan;
 pub mod optimizer;
@@ -10,6 +11,10 @@ mod tests;
 pub use ai_optimizer::{
     AiOptimizer, AiOptimizerDiagnostics, FeatureVec, FeedbackRecord, PlanKind, QueryFingerprint,
     FEATURE_DIM,
+};
+pub use aiops::{
+    AiOps, AiOpsAlert, AiOpsStats, AlertSeverity, IndexAdvice, SlowQueryRecord, WorkloadStat,
+    global_aiops,
 };
 pub use cost::{
     estimate_selectivity, index_scan_cost, prefer_index_scan, seq_scan_cost, ColumnStatsInfo,

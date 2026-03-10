@@ -12,11 +12,13 @@ use falcon_common::security::{
 };
 use falcon_common::types::{DataType, TableId};
 use falcon_planner::ai_optimizer::{extract_features_from_physical, AiOptimizer, FeedbackRecord, PlanKind};
+use falcon_planner::aiops::{global_aiops, AiOps};
 use falcon_planner::PhysicalPlan;
 use falcon_sql_frontend::types::*;
 use falcon_storage::engine::StorageEngine;
 use falcon_txn::{TxnHandle, TxnManager};
 
+use crate::enterprise::{DmlAuditLog, ReplicationSlotManager, RlsRegistry};
 use crate::external_sort::ExternalSorter;
 use crate::parallel::ParallelConfig;
 
@@ -69,6 +71,14 @@ pub struct Executor {
     current_role: RoleId,
     /// AI query optimizer for plan selection feedback.
     pub(crate) ai_optimizer: Arc<AiOptimizer>,
+    /// AIOps engine: slow-query detection, anomaly detection, index advisor, workload profiler.
+    pub(crate) aiops: Arc<AiOps>,
+    /// Enterprise: Row Level Security policy registry.
+    pub(crate) rls_registry: Arc<RlsRegistry>,
+    /// Enterprise: Logical replication slot manager.
+    pub(crate) repl_slots: Arc<ReplicationSlotManager>,
+    /// Enterprise: DML audit log.
+    pub(crate) dml_audit: Arc<DmlAuditLog>,
 }
 
 impl Executor {
@@ -82,11 +92,15 @@ impl Executor {
             external_sorter: None,
             hash_agg_group_limit: 0,
             ai_optimizer: Arc::new(AiOptimizer::new()),
+            aiops: Arc::new(global_aiops().clone()),
             recursive_cte_max_rows: 0,
             parallel_config: ParallelConfig::default(),
             role_catalog: None,
             privilege_manager: None,
             current_role: SUPERUSER_ROLE_ID,
+            rls_registry: Arc::new(RlsRegistry::new()),
+            repl_slots: Arc::new(ReplicationSlotManager::new()),
+            dml_audit: Arc::new(DmlAuditLog::new()),
         }
     }
 
@@ -101,11 +115,15 @@ impl Executor {
             external_sorter: None,
             hash_agg_group_limit: 0,
             ai_optimizer: Arc::new(AiOptimizer::new()),
+            aiops: Arc::new(global_aiops().clone()),
             recursive_cte_max_rows: 0,
             parallel_config: ParallelConfig::default(),
             role_catalog: None,
             privilege_manager: None,
             current_role: SUPERUSER_ROLE_ID,
+            rls_registry: Arc::new(RlsRegistry::new()),
+            repl_slots: Arc::new(ReplicationSlotManager::new()),
+            dml_audit: Arc::new(DmlAuditLog::new()),
         }
     }
 
@@ -332,6 +350,19 @@ impl Executor {
         self.execute(&substituted, txn)
     }
 
+    /// Extract table name and filter column hints from a scan plan for AIOps.
+    fn extract_scan_context(plan: &PhysicalPlan) -> (Option<String>, Vec<String>) {
+        match plan {
+            PhysicalPlan::SeqScan { schema, .. } => {
+                (Some(schema.name.clone()), vec![])
+            }
+            PhysicalPlan::IndexScan { schema, .. } | PhysicalPlan::IndexRangeScan { schema, .. } => {
+                (Some(schema.name.clone()), vec![])
+            }
+            _ => (None, vec![]),
+        }
+    }
+
     /// Whether a plan is a query that benefits from AI feedback.
     fn is_query_plan(plan: &PhysicalPlan) -> bool {
         matches!(
@@ -353,9 +384,19 @@ impl Executor {
         plan: &PhysicalPlan,
         txn: Option<&TxnHandle>,
     ) -> Result<ExecutionResult, FalconError> {
+        self.execute_with_sql(plan, txn, "")
+    }
+
+    /// Execute with original SQL text for AIOps telemetry.
+    pub fn execute_with_sql(
+        &self,
+        plan: &PhysicalPlan,
+        txn: Option<&TxnHandle>,
+        sql_text: &str,
+    ) -> Result<ExecutionResult, FalconError> {
         crate::eval::scalar_time::reset_statement_ts();
 
-        // AI feedback: time query plans and record actual execution cost.
+        // AI feedback + AIOps: time query plans, record feedback, feed AIOps engine.
         if Self::is_query_plan(plan) {
             let t0 = Instant::now();
             let result = self.execute_inner(plan, txn);
@@ -369,6 +410,18 @@ impl Executor {
                 actual_us: elapsed_us,
                 predicted_log2_cost: predicted,
             });
+            let plan_kind_str = format!("{:?}", kind);
+            let (table_name, filter_cols_owned) = Self::extract_scan_context(plan);
+            let filter_cols: Vec<&str> = filter_cols_owned.iter().map(String::as_str).collect();
+            let is_error = result.is_err();
+            self.aiops.record(
+                sql_text,
+                &plan_kind_str,
+                table_name.as_deref(),
+                &filter_cols,
+                elapsed_us,
+                is_error,
+            );
             return result;
         }
 
@@ -607,10 +660,11 @@ impl Executor {
             PhysicalPlan::CreateTable {
                 schema,
                 if_not_exists,
+                partition_spec,
             } => {
                 self.reject_if_read_only("CREATE TABLE")?;
                 self.check_privilege(Privilege::Create, ObjectType::Schema, "public")?;
-                self.exec_create_table(schema, *if_not_exists)
+                self.exec_create_table(schema, *if_not_exists, partition_spec.as_ref())
             }
             PhysicalPlan::CreateTableAs {
                 table_name,
@@ -1761,6 +1815,280 @@ impl Executor {
                 ];
                 Ok(ExecutionResult::Query { columns, rows })
             }
+            PhysicalPlan::ShowAiopsStats => {
+                use falcon_common::types::DataType;
+                let s = self.aiops.stats();
+                let columns = vec![
+                    ("metric".to_owned(), DataType::Text),
+                    ("value".to_owned(), DataType::Text),
+                ];
+                let rows = vec![
+                    OwnedRow::new(vec![Datum::Text("slow_query_samples".into()), Datum::Text(s.slow_query_total_samples.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("slow_query_threshold_us".into()), Datum::Text(s.slow_query_threshold_us.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("slow_query_ema_baseline_us".into()), Datum::Text(s.slow_query_ema_baseline_us.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("slow_query_logged".into()), Datum::Text(s.slow_query_logged.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("anomaly_tps_mean".into()), Datum::Text(format!("{:.2}", s.anomaly_tps_mean))]),
+                    OwnedRow::new(vec![Datum::Text("anomaly_tps_stddev".into()), Datum::Text(format!("{:.2}", s.anomaly_tps_stddev))]),
+                    OwnedRow::new(vec![Datum::Text("anomaly_latency_mean_us".into()), Datum::Text(format!("{:.2}", s.anomaly_latency_mean_us))]),
+                    OwnedRow::new(vec![Datum::Text("anomaly_latency_stddev_us".into()), Datum::Text(format!("{:.2}", s.anomaly_latency_stddev_us))]),
+                    OwnedRow::new(vec![Datum::Text("anomaly_alerts_total".into()), Datum::Text(s.anomaly_alerts_total.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("index_advisor_tables_tracked".into()), Datum::Text(s.index_advisor_tables_tracked.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("index_advisor_advice_count".into()), Datum::Text(s.index_advisor_advice_count.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("workload_fingerprints".into()), Datum::Text(s.workload_fingerprints.to_string())]),
+                ];
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::ShowAiopsAlerts => {
+                use falcon_common::types::DataType;
+                let alerts = self.aiops.recent_alerts(50);
+                let columns = vec![
+                    ("id".to_owned(), DataType::Int64),
+                    ("ts_unix_ms".to_owned(), DataType::Int64),
+                    ("severity".to_owned(), DataType::Text),
+                    ("source".to_owned(), DataType::Text),
+                    ("message".to_owned(), DataType::Text),
+                ];
+                let rows = alerts.iter().map(|a| OwnedRow::new(vec![
+                    Datum::Int64(a.id as i64),
+                    Datum::Int64(a.ts_unix_ms as i64),
+                    Datum::Text(a.severity.to_string()),
+                    Datum::Text(a.source.clone()),
+                    Datum::Text(a.message.clone()),
+                ])).collect();
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::ShowAiopsIndexAdvice => {
+                use falcon_common::types::DataType;
+                let advice = self.aiops.index_advice();
+                let columns = vec![
+                    ("table_name".to_owned(), DataType::Text),
+                    ("full_scan_count".to_owned(), DataType::Int64),
+                    ("avg_scan_duration_us".to_owned(), DataType::Int64),
+                    ("column_hints".to_owned(), DataType::Text),
+                    ("suggestion".to_owned(), DataType::Text),
+                ];
+                let rows = advice.iter().map(|a| OwnedRow::new(vec![
+                    Datum::Text(a.table_name.clone()),
+                    Datum::Int64(a.full_scan_count as i64),
+                    Datum::Int64(a.avg_scan_duration_us as i64),
+                    Datum::Text(a.column_hints.join(", ")),
+                    Datum::Text(a.suggestion.clone()),
+                ])).collect();
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::ShowAiopsWorkload => {
+                use falcon_common::types::DataType;
+                let workloads = self.aiops.top_workloads(20);
+                let columns = vec![
+                    ("fingerprint".to_owned(), DataType::Text),
+                    ("call_count".to_owned(), DataType::Int64),
+                    ("avg_us".to_owned(), DataType::Int64),
+                    ("p95_us".to_owned(), DataType::Int64),
+                    ("p99_us".to_owned(), DataType::Int64),
+                    ("max_us".to_owned(), DataType::Int64),
+                    ("total_us".to_owned(), DataType::Int64),
+                    ("error_count".to_owned(), DataType::Int64),
+                ];
+                let rows = workloads.iter().map(|w| OwnedRow::new(vec![
+                    Datum::Text(w.fingerprint.clone()),
+                    Datum::Int64(w.call_count as i64),
+                    Datum::Int64(w.avg_us() as i64),
+                    Datum::Int64(w.p95_us() as i64),
+                    Datum::Int64(w.p99_us() as i64),
+                    Datum::Int64(w.max_us as i64),
+                    Datum::Int64(w.total_us as i64),
+                    Datum::Int64(w.error_count as i64),
+                ])).collect();
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::ShowAiopsSlowQueries => {
+                use falcon_common::types::DataType;
+                let records = self.aiops.slow_queries(100);
+                let columns = vec![
+                    ("ts_unix_ms".to_owned(), DataType::Int64),
+                    ("duration_us".to_owned(), DataType::Int64),
+                    ("threshold_us".to_owned(), DataType::Int64),
+                    ("plan_kind".to_owned(), DataType::Text),
+                    ("table_name".to_owned(), DataType::Text),
+                    ("sql_text".to_owned(), DataType::Text),
+                ];
+                let rows = records.iter().map(|r| OwnedRow::new(vec![
+                    Datum::Int64(r.ts_unix_ms as i64),
+                    Datum::Int64(r.duration_us as i64),
+                    Datum::Int64(r.threshold_us as i64),
+                    Datum::Text(r.plan_kind.clone()),
+                    Datum::Text(r.table_name.clone()),
+                    Datum::Text(r.sql_text.clone()),
+                ])).collect();
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            // ── Enterprise: RLS ────────────────────────────────────────────
+            PhysicalPlan::AlterTableEnableRls { table_name, enable } => {
+                self.rls_registry.set_enabled(table_name, *enable);
+                let msg = if *enable {
+                    format!("Row level security enabled on \"{}\"", table_name)
+                } else {
+                    format!("Row level security disabled on \"{}\"", table_name)
+                };
+                Ok(ExecutionResult::Ddl { message: msg })
+            }
+            PhysicalPlan::CreatePolicy { policy_name, table_name, command, permissive, using_expr, check_expr } => {
+                self.rls_registry.add_policy(
+                    table_name,
+                    policy_name,
+                    command,
+                    *permissive,
+                    using_expr.clone(),
+                    check_expr.clone(),
+                );
+                Ok(ExecutionResult::Ddl { message: format!("Policy \"{}\" created on \"{}\"", policy_name, table_name) })
+            }
+            PhysicalPlan::DropPolicy { policy_name, table_name, if_exists } => {
+                let dropped = self.rls_registry.drop_policy(table_name, policy_name);
+                if !dropped && !if_exists {
+                    return Err(FalconError::Sql(falcon_common::error::SqlError::UnknownTable(
+                        format!("policy \"{}\" on \"{}\" does not exist", policy_name, table_name),
+                    )));
+                }
+                Ok(ExecutionResult::Ddl { message: format!("Policy \"{}\" dropped", policy_name) })
+            }
+            PhysicalPlan::ShowPolicies { table_name } => {
+                use falcon_common::types::DataType;
+                let policies = self.rls_registry.list_policies(table_name.as_deref());
+                let columns = vec![
+                    ("table_name".to_owned(), DataType::Text),
+                    ("policy_name".to_owned(), DataType::Text),
+                    ("command".to_owned(), DataType::Text),
+                    ("permissive".to_owned(), DataType::Boolean),
+                    ("using_expr".to_owned(), DataType::Text),
+                    ("check_expr".to_owned(), DataType::Text),
+                    ("rls_enabled".to_owned(), DataType::Boolean),
+                ];
+                let rows = policies.into_iter().map(|p| OwnedRow::new(vec![
+                    Datum::Text(p.0),
+                    Datum::Text(p.1),
+                    Datum::Text(p.2),
+                    Datum::Boolean(p.3),
+                    p.4.map_or(Datum::Null, Datum::Text),
+                    p.5.map_or(Datum::Null, Datum::Text),
+                    Datum::Boolean(p.6),
+                ])).collect();
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            // ── Enterprise: Replication Slots ─────────────────────────────
+            PhysicalPlan::CreateReplicationSlot { slot_name, plugin } => {
+                use falcon_common::types::DataType;
+                self.repl_slots.create(slot_name, plugin);
+                let lsn = self.repl_slots.current_lsn();
+                let columns = vec![
+                    ("slot_name".to_owned(), DataType::Text),
+                    ("plugin".to_owned(), DataType::Text),
+                    ("confirmed_flush_lsn".to_owned(), DataType::Int64),
+                ];
+                let rows = vec![OwnedRow::new(vec![
+                    Datum::Text(slot_name.clone()),
+                    Datum::Text(plugin.clone()),
+                    Datum::Int64(lsn as i64),
+                ])];
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::DropReplicationSlot { slot_name } => {
+                self.repl_slots.remove(slot_name);
+                Ok(ExecutionResult::Ddl { message: format!("Replication slot \"{}\" dropped", slot_name) })
+            }
+            PhysicalPlan::ShowReplicationSlots => {
+                use falcon_common::types::DataType;
+                let slots = self.repl_slots.list();
+                let columns = vec![
+                    ("slot_name".to_owned(), DataType::Text),
+                    ("plugin".to_owned(), DataType::Text),
+                    ("confirmed_flush_lsn".to_owned(), DataType::Int64),
+                    ("restart_lsn".to_owned(), DataType::Int64),
+                    ("active".to_owned(), DataType::Boolean),
+                    ("created_at_unix_ms".to_owned(), DataType::Int64),
+                ];
+                let rows = slots.into_iter().map(|s| OwnedRow::new(vec![
+                    Datum::Text(s.name),
+                    Datum::Text(s.plugin),
+                    Datum::Int64(s.confirmed_flush_lsn as i64),
+                    Datum::Int64(s.restart_lsn as i64),
+                    Datum::Boolean(s.active),
+                    Datum::Int64(s.created_at_unix_ms as i64),
+                ])).collect();
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            // ── Enterprise: Audit Log ─────────────────────────────────────
+            PhysicalPlan::ShowAuditLog { limit } => {
+                use falcon_common::types::DataType;
+                let events = self.dml_audit.snapshot(*limit);
+                let columns = vec![
+                    ("event_id".to_owned(), DataType::Int64),
+                    ("timestamp_ms".to_owned(), DataType::Int64),
+                    ("event_type".to_owned(), DataType::Text),
+                    ("role_name".to_owned(), DataType::Text),
+                    ("detail".to_owned(), DataType::Text),
+                    ("sql".to_owned(), DataType::Text),
+                    ("success".to_owned(), DataType::Boolean),
+                ];
+                let rows = events.into_iter().map(|e| OwnedRow::new(vec![
+                    Datum::Int64(e.event_id as i64),
+                    Datum::Int64(e.timestamp_ms as i64),
+                    Datum::Text(e.event_type.clone()),
+                    Datum::Text(e.role_name.clone()),
+                    Datum::Text(e.detail.clone()),
+                    e.sql.clone().map_or(Datum::Null, Datum::Text),
+                    Datum::Boolean(e.success),
+                ])).collect();
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::ShowAuditLogForTable { table_name, limit } => {
+                use falcon_common::types::DataType;
+                let events = self.dml_audit.snapshot(*limit);
+                let events: Vec<_> = events.into_iter()
+                    .filter(|e| e.sql.as_deref().map_or(false, |s| s.to_lowercase().contains(table_name.as_str())))
+                    .collect();
+                let columns = vec![
+                    ("event_id".to_owned(), DataType::Int64),
+                    ("timestamp_ms".to_owned(), DataType::Int64),
+                    ("event_type".to_owned(), DataType::Text),
+                    ("role_name".to_owned(), DataType::Text),
+                    ("detail".to_owned(), DataType::Text),
+                    ("sql".to_owned(), DataType::Text),
+                    ("success".to_owned(), DataType::Boolean),
+                ];
+                let rows = events.into_iter().map(|e| OwnedRow::new(vec![
+                    Datum::Int64(e.event_id as i64),
+                    Datum::Int64(e.timestamp_ms as i64),
+                    Datum::Text(e.event_type.clone()),
+                    Datum::Text(e.role_name.clone()),
+                    Datum::Text(e.detail.clone()),
+                    e.sql.clone().map_or(Datum::Null, Datum::Text),
+                    Datum::Boolean(e.success),
+                ])).collect();
+                Ok(ExecutionResult::Query { columns, rows })
+            }
+            PhysicalPlan::ShowMemoryProfile => {
+                use falcon_common::types::DataType;
+                let snap = self.storage.memory_profile_snapshot();
+                let columns = vec![
+                    ("metric".to_owned(), DataType::Text),
+                    ("value".to_owned(), DataType::Text),
+                ];
+                let rows = vec![
+                    OwnedRow::new(vec![Datum::Text("large_mem_enabled".into()), Datum::Text(snap.large_mem_enabled.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("dashmap_shards".into()), Datum::Text(snap.dashmap_shards.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("capacity_hint".into()), Datum::Text(snap.capacity_hint.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("skip_pk_order".into()), Datum::Text(snap.skip_pk_order.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("gc_interval_ms".into()), Datum::Text(snap.gc_interval_ms.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("gc_batch_size".into()), Datum::Text(snap.gc_batch_size.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("memory_soft_limit_bytes".into()), Datum::Text(snap.soft_limit_bytes.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("memory_hard_limit_bytes".into()), Datum::Text(snap.hard_limit_bytes.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("memory_used_bytes".into()), Datum::Text(snap.used_bytes.to_string())]),
+                    OwnedRow::new(vec![Datum::Text("pressure_state".into()), Datum::Text(snap.pressure_state)]),
+                    OwnedRow::new(vec![Datum::Text("table_count".into()), Datum::Text(snap.table_count.to_string())]),
+                ];
+                Ok(ExecutionResult::Query { columns, rows })
+            }
             PhysicalPlan::DistPlan { .. } => Err(FalconError::Internal(
                 "DistPlan must be executed via DistributedQueryEngine, not the local Executor"
                     .into(),
@@ -2141,20 +2469,50 @@ impl Executor {
         &self,
         schema: &TableSchema,
         if_not_exists: bool,
+        partition_spec: Option<&falcon_sql_frontend::types::BoundPartitionSpec>,
     ) -> Result<ExecutionResult, FalconError> {
         match self.storage.create_table(schema.clone()) {
-            Ok(_) => Ok(ExecutionResult::Ddl {
-                message: format!("CREATE TABLE {}", schema.name),
-            }),
-            Err(e) if if_not_exists => {
-                // IF NOT EXISTS — silently succeed
+            Ok(table_id) => {
+                if let Some(spec) = partition_spec {
+                    use falcon_sql_frontend::types::PartitionStrategy;
+                    use falcon_storage::partition::{
+                        PartitionStrategy as StorageStrategy, PartitionedTableDef,
+                    };
+                    let key_idx = schema
+                        .columns
+                        .iter()
+                        .position(|c| c.name.eq_ignore_ascii_case(&spec.key_column))
+                        .ok_or_else(|| FalconError::Execution(
+                            falcon_common::error::ExecutionError::Internal(
+                                format!("partition key column '{}' not found", spec.key_column),
+                            ),
+                        ))?;
+                    let storage_strategy = match spec.strategy {
+                        PartitionStrategy::Range => StorageStrategy::Range,
+                        PartitionStrategy::List  => StorageStrategy::List,
+                        PartitionStrategy::Hash  => StorageStrategy::Hash { modulus: 8 },
+                    };
+                    let pdef = PartitionedTableDef {
+                        parent_table_id: table_id,
+                        parent_table_name: schema.name.clone(),
+                        partition_key_idx: key_idx,
+                        partition_key_name: spec.key_column.clone(),
+                        strategy: storage_strategy,
+                        partitions: Vec::new(),
+                        has_default: false,
+                    };
+                    self.storage.register_partitioned_table(pdef);
+                }
                 Ok(ExecutionResult::Ddl {
-                    message: format!(
-                        "CREATE TABLE IF NOT EXISTS {} (already exists)",
-                        schema.name
-                    ),
+                    message: format!("CREATE TABLE {}", schema.name),
                 })
             }
+            Err(e) if if_not_exists => Ok(ExecutionResult::Ddl {
+                message: format!(
+                    "CREATE TABLE IF NOT EXISTS {} (already exists)",
+                    schema.name
+                ),
+            }),
             Err(e) => Err(e.into()),
         }
     }
@@ -2949,10 +3307,11 @@ impl Executor {
             PhysicalPlan::CreateTable {
                 schema,
                 if_not_exists,
+                partition_spec,
             } => {
                 vec![format!(
-                    "{}CreateTable {} (if_not_exists={})",
-                    pad, schema.name, if_not_exists
+                    "{}CreateTable {} (if_not_exists={}, partitioned={})",
+                    pad, schema.name, if_not_exists, partition_spec.is_some()
                 )]
             }
             PhysicalPlan::CreateTableAs {

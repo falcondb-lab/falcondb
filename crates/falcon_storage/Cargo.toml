@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["lsm", "online_ddl_full"]
+default = ["lsm", "online_ddl_full", "disk_rowstore"]
 # Non-v1.0 storage engines (STUB / EXPERIMENTAL).
 columnstore = []
 disk_rowstore = []
@@ -22,6 +22,18 @@ online_ddl_full = []
 resource_isolation = []
 tenant = []
 cdc_stream = []
+
+# ── Edition profiles ────────────────────────────────────────────────────────
+# Community: in-memory rowstore only, no enterprise features.
+edition_community = []
+# Standard: RocksDB-backed disk-first OLTP, full PG compatibility.
+edition_standard = ["rocksdb", "online_ddl_full"]
+# Enterprise: Standard + columnstore + PITR + TDE + CDC + multi-tenant.
+edition_enterprise = ["rocksdb", "online_ddl_full", "columnstore",
+                      "pitr_object_store", "encryption_tde", "cdc_stream",
+                      "tenant", "resource_isolation"]
+# Analytics: columnstore primary, on-disk oriented for OLAP workloads.
+edition_analytics  = ["columnstore", "rocksdb", "online_ddl_full"]
 
 [dependencies]
 falcon_common = { path = "../falcon_common" }

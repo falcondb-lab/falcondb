@@ -175,19 +175,43 @@ impl Executor {
         use falcon_common::schema::{TriggerEvent, TriggerTiming};
         self.fire_triggers(&schema.name, TriggerTiming::Before, TriggerEvent::Insert, txn)?;
         let result = (|| {
+            // ── Partition routing: if parent table is partitioned, resolve child table_id ──
+            let effective_table_id = if self.storage.is_partitioned(table_id) {
+                if let Some(key_idx) = self.storage.partition_key_idx(table_id) {
+                    let col_pos = columns.get(key_idx).copied().unwrap_or(key_idx);
+                    let first_row = rows.first();
+                    let datum_opt = first_row
+                        .and_then(|r| r.get(col_pos))
+                        .and_then(|expr| {
+                            static EMPTY_ROW: OwnedRow = OwnedRow::empty();
+                            ExprEngine::eval_row(expr, &EMPTY_ROW).ok()
+                        });
+                    if let Some(datum) = datum_opt {
+                        self.storage.route_partition(table_id, &datum).unwrap_or(table_id)
+                    } else {
+                        table_id
+                    }
+                } else {
+                    table_id
+                }
+            } else {
+                table_id
+            };
+
             // ── Fast path: no RETURNING, no ON CONFLICT ──────────────────────
             if returning.is_empty() && on_conflict.is_none() {
-                return self.exec_insert_batch(table_id, schema, columns, rows, txn);
+                return self.exec_insert_batch(effective_table_id, schema, columns, rows, txn);
             }
 
             // ── Fast path: ON CONFLICT DO NOTHING without RETURNING ──────────
             if returning.is_empty() && matches!(on_conflict, Some(OnConflictAction::DoNothing)) {
-                return self.exec_insert_conflict_skip(table_id, schema, columns, rows, txn);
+                return self.exec_insert_conflict_skip(effective_table_id, schema, columns, rows, txn);
             }
 
             // ── Slow path: RETURNING or ON CONFLICT DO UPDATE ────────────────
-            self.exec_insert_slow(table_id, schema, columns, rows, returning, on_conflict, txn)
-        })()?;
+            self.exec_insert_slow(effective_table_id, schema, columns, rows, returning, on_conflict, txn)
+        })()?
+;
         self.fire_triggers(&schema.name, TriggerTiming::After, TriggerEvent::Insert, txn)?;
         Ok(result)
     }
@@ -1013,15 +1037,19 @@ impl Executor {
             );
         }
 
+        // Apply RLS USING filter for UPDATE — hidden rows are silently skipped
+        let rls_merged = self.apply_rls_filter(filter.cloned(), schema, "UPDATE");
+        let effective_where: Option<&BoundExpr> = rls_merged.as_ref().or(filter);
+
         let read_ts = txn.read_ts(self.txn_mgr.current_ts());
         let (rows, effective_filter) =
-            if let Some((pk, remaining)) = self.try_pk_point_lookup(filter, schema) {
+            if let Some((pk, remaining)) = self.try_pk_point_lookup(effective_where, schema) {
                 match self.storage.get(table_id, &pk, txn.txn_id, read_ts)? {
                     Some(row) => (vec![(pk, row)], remaining),
                     None => (vec![], remaining),
                 }
             } else if let Some((col_idx, key, remaining)) =
-                self.try_index_scan_predicate(filter, table_id)
+                self.try_index_scan_predicate(effective_where, table_id)
             {
                 (
                     self.storage
@@ -1031,7 +1059,7 @@ impl Executor {
             } else {
                 (
                     self.storage.scan(table_id, txn.txn_id, read_ts)?,
-                    filter.cloned(),
+                    effective_where.cloned(),
                 )
             };
         let mut count = 0u64;
@@ -1209,15 +1237,19 @@ impl Executor {
             return self.exec_delete_using(table_id, schema, filter, returning, ut, txn);
         }
 
+        // Apply RLS USING filter for DELETE — hidden rows are silently skipped
+        let rls_merged = self.apply_rls_filter(filter.cloned(), schema, "DELETE");
+        let effective_where: Option<&BoundExpr> = rls_merged.as_ref().or(filter);
+
         let read_ts = txn.read_ts(self.txn_mgr.current_ts());
         let (rows, effective_filter) =
-            if let Some((pk, remaining)) = self.try_pk_point_lookup(filter, schema) {
+            if let Some((pk, remaining)) = self.try_pk_point_lookup(effective_where, schema) {
                 match self.storage.get(table_id, &pk, txn.txn_id, read_ts)? {
                     Some(row) => (vec![(pk, row)], remaining),
                     None => (vec![], remaining),
                 }
             } else if let Some((col_idx, key, remaining)) =
-                self.try_index_scan_predicate(filter, table_id)
+                self.try_index_scan_predicate(effective_where, table_id)
             {
                 (
                     self.storage
@@ -1227,7 +1259,7 @@ impl Executor {
             } else {
                 (
                     self.storage.scan(table_id, txn.txn_id, read_ts)?,
-                    filter.cloned(),
+                    effective_where.cloned(),
                 )
             };
         let mut count = 0u64;

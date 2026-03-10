@@ -58,6 +58,7 @@ impl Planner {
             BoundStatement::CreateTable(ct) => Ok(PhysicalPlan::CreateTable {
                 schema: ct.schema.clone(),
                 if_not_exists: ct.if_not_exists,
+                partition_spec: ct.partition_spec.clone(),
             }),
             BoundStatement::DropTable(dt) => Ok(PhysicalPlan::DropTable {
                 table_name: dt.table_name.clone(),
@@ -481,6 +482,42 @@ impl Planner {
             BoundStatement::ShowJobs => Ok(PhysicalPlan::ShowJobs),
             BoundStatement::ShowBackupStatus => Ok(PhysicalPlan::ShowBackupStatus),
             BoundStatement::ShowAiStats => Ok(PhysicalPlan::ShowAiStats),
+            BoundStatement::ShowAiopsStats => Ok(PhysicalPlan::ShowAiopsStats),
+            BoundStatement::ShowAiopsAlerts => Ok(PhysicalPlan::ShowAiopsAlerts),
+            BoundStatement::ShowAiopsIndexAdvice => Ok(PhysicalPlan::ShowAiopsIndexAdvice),
+            BoundStatement::ShowAiopsWorkload => Ok(PhysicalPlan::ShowAiopsWorkload),
+            BoundStatement::ShowAiopsSlowQueries => Ok(PhysicalPlan::ShowAiopsSlowQueries),
+            BoundStatement::ShowMemoryProfile => Ok(PhysicalPlan::ShowMemoryProfile),
+            BoundStatement::AlterTableEnableRls { table_name, enable } => {
+                Ok(PhysicalPlan::AlterTableEnableRls { table_name: table_name.clone(), enable: *enable })
+            }
+            BoundStatement::CreatePolicy { policy_name, table_name, command, permissive, using_expr, check_expr } => {
+                Ok(PhysicalPlan::CreatePolicy {
+                    policy_name: policy_name.clone(),
+                    table_name: table_name.clone(),
+                    command: command.clone(),
+                    permissive: *permissive,
+                    using_expr: using_expr.clone(),
+                    check_expr: check_expr.clone(),
+                })
+            }
+            BoundStatement::DropPolicy { policy_name, table_name, if_exists } => {
+                Ok(PhysicalPlan::DropPolicy { policy_name: policy_name.clone(), table_name: table_name.clone(), if_exists: *if_exists })
+            }
+            BoundStatement::ShowPolicies { table_name } => {
+                Ok(PhysicalPlan::ShowPolicies { table_name: table_name.clone() })
+            }
+            BoundStatement::CreateReplicationSlot { slot_name, plugin } => {
+                Ok(PhysicalPlan::CreateReplicationSlot { slot_name: slot_name.clone(), plugin: plugin.clone() })
+            }
+            BoundStatement::DropReplicationSlot { slot_name } => {
+                Ok(PhysicalPlan::DropReplicationSlot { slot_name: slot_name.clone() })
+            }
+            BoundStatement::ShowReplicationSlots => Ok(PhysicalPlan::ShowReplicationSlots),
+            BoundStatement::ShowAuditLog { limit } => Ok(PhysicalPlan::ShowAuditLog { limit: *limit }),
+            BoundStatement::ShowAuditLogForTable { table_name, limit } => {
+                Ok(PhysicalPlan::ShowAuditLogForTable { table_name: table_name.clone(), limit: *limit })
+            }
         }
     }
 
@@ -1981,6 +2018,7 @@ impl Planner {
             } => Ok(PhysicalPlan::CreateTable {
                 schema,
                 if_not_exists,
+                partition_spec: None,
             }),
             LogicalPlan::DropTable {
                 table_name,

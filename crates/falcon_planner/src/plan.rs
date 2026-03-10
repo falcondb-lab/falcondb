@@ -49,6 +49,7 @@ pub enum PhysicalPlan {
     CreateTable {
         schema: TableSchema,
         if_not_exists: bool,
+        partition_spec: Option<falcon_sql_frontend::types::BoundPartitionSpec>,
     },
     /// DDL: create table as
     CreateTableAs {
@@ -495,6 +496,37 @@ pub enum PhysicalPlan {
     ShowBackupStatus,
     /// SHOW AI STATS — returns AI optimizer diagnostics
     ShowAiStats,
+    /// SHOW AIOPS STATS
+    ShowAiopsStats,
+    /// SHOW AIOPS ALERTS
+    ShowAiopsAlerts,
+    /// SHOW AIOPS INDEX ADVICE
+    ShowAiopsIndexAdvice,
+    /// SHOW AIOPS WORKLOAD
+    ShowAiopsWorkload,
+    /// SHOW AIOPS SLOW QUERIES
+    ShowAiopsSlowQueries,
+    /// SHOW MEMORY PROFILE
+    ShowMemoryProfile,
+    // ── Enterprise: RLS ────────────────────────────────────────────────────
+    AlterTableEnableRls { table_name: String, enable: bool },
+    CreatePolicy {
+        policy_name: String,
+        table_name: String,
+        command: String,
+        permissive: bool,
+        using_expr: Option<String>,
+        check_expr: Option<String>,
+    },
+    DropPolicy { policy_name: String, table_name: String, if_exists: bool },
+    ShowPolicies { table_name: Option<String> },
+    // ── Enterprise: Logical Replication Slots ─────────────────────────────
+    CreateReplicationSlot { slot_name: String, plugin: String },
+    DropReplicationSlot { slot_name: String },
+    ShowReplicationSlots,
+    // ── Enterprise: Audit Log ─────────────────────────────────────────────
+    ShowAuditLog { limit: usize },
+    ShowAuditLogForTable { table_name: String, limit: usize },
     /// Distributed plan: wraps a local subplan for scatter/gather execution
     /// across multiple shards. The executor dispatches this to the
     /// DistributedExecutor for parallel execution + merge.

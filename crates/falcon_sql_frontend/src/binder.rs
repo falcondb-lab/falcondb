@@ -145,6 +145,167 @@ impl Binder {
             return Some(Ok(BoundStatement::ShowAiStats));
         }
 
+        // ── SHOW MEMORY PROFILE ──
+        if upper.starts_with("SHOW MEMORY PROFILE") {
+            return Some(Ok(BoundStatement::ShowMemoryProfile));
+        }
+
+        // ── SHOW AIOPS ... ──
+        if upper.starts_with("SHOW AIOPS") {
+            let rest = upper["SHOW AIOPS".len()..].trim();
+            let variant = if rest.starts_with("ALERTS") {
+                BoundStatement::ShowAiopsAlerts
+            } else if rest.starts_with("INDEX ADVICE") || rest.starts_with("INDEX") {
+                BoundStatement::ShowAiopsIndexAdvice
+            } else if rest.starts_with("WORKLOAD") {
+                BoundStatement::ShowAiopsWorkload
+            } else if rest.starts_with("SLOW") {
+                BoundStatement::ShowAiopsSlowQueries
+            } else {
+                BoundStatement::ShowAiopsStats
+            };
+            return Some(Ok(variant));
+        }
+
+        // ── ALTER TABLE <name> ENABLE/DISABLE ROW LEVEL SECURITY ──
+        if upper.starts_with("ALTER TABLE ") && (upper.contains("ENABLE ROW LEVEL SECURITY") || upper.contains("DISABLE ROW LEVEL SECURITY")) {
+            let enable = upper.contains("ENABLE ROW LEVEL SECURITY");
+            // extract table name between "ALTER TABLE " and " ENABLE/DISABLE"
+            let after = &upper["ALTER TABLE ".len()..];
+            let end = after.find(if enable { " ENABLE" } else { " DISABLE" }).unwrap_or(after.len());
+            let table_name = after[..end].trim().to_lowercase();
+            if !table_name.is_empty() {
+                return Some(Ok(BoundStatement::AlterTableEnableRls { table_name, enable }));
+            }
+        }
+
+        // ── CREATE POLICY <name> ON <table> ... ──
+        if upper.starts_with("CREATE POLICY ") {
+            let rest = trimmed["CREATE POLICY ".len()..].trim();
+            let upper_rest = rest.to_uppercase();
+            let on_pos = upper_rest.find(" ON ").unwrap_or(0);
+            if on_pos > 0 {
+                let policy_name = rest[..on_pos].trim().to_lowercase();
+                let after_on = rest[on_pos + 4..].trim();
+                let upper_after = after_on.to_uppercase();
+                // Find FOR / USING / WITH CHECK boundaries
+                let for_pos = upper_after.find(" FOR ").unwrap_or(usize::MAX);
+                let using_pos = upper_after.find(" USING ").unwrap_or(usize::MAX);
+                let check_pos = upper_after.find(" WITH CHECK ").unwrap_or(usize::MAX);
+                let table_end = for_pos.min(using_pos).min(check_pos);
+                let table_end = if table_end == usize::MAX { after_on.len() } else { table_end };
+                let table_name = after_on[..table_end].trim().to_lowercase();
+
+                let command = if for_pos != usize::MAX {
+                    let after_for = upper_after[for_pos + 5..].trim();
+                    let cmd_end = after_for.find(|c: char| c.is_whitespace()).unwrap_or(after_for.len());
+                    after_for[..cmd_end].to_uppercase()
+                } else {
+                    "ALL".to_owned()
+                };
+
+                let extract_parens = |src: &str, marker: &str| -> Option<String> {
+                    let upper_src = src.to_uppercase();
+                    let pos = upper_src.find(marker)?;
+                    let after = src[pos + marker.len()..].trim();
+                    let after = after.trim_start_matches('(');
+                    let close = after.rfind(')')?;
+                    Some(after[..close].to_owned())
+                };
+
+                let using_expr = extract_parens(after_on, "USING (").or_else(|| extract_parens(after_on, "USING("));
+                let check_expr = extract_parens(after_on, "WITH CHECK (").or_else(|| extract_parens(after_on, "WITH CHECK("));
+                let permissive = !upper_after.contains(" AS RESTRICTIVE");
+
+                return Some(Ok(BoundStatement::CreatePolicy {
+                    policy_name,
+                    table_name,
+                    command,
+                    permissive,
+                    using_expr,
+                    check_expr,
+                }));
+            }
+        }
+
+        // ── DROP POLICY [IF EXISTS] <name> ON <table> ──
+        if upper.starts_with("DROP POLICY ") {
+            let rest = trimmed["DROP POLICY ".len()..].trim();
+            let upper_rest = rest.to_uppercase();
+            let (if_exists, rest2) = if upper_rest.starts_with("IF EXISTS ") {
+                (true, rest["IF EXISTS ".len()..].trim())
+            } else {
+                (false, rest)
+            };
+            let upper2 = rest2.to_uppercase();
+            if let Some(on_pos) = upper2.find(" ON ") {
+                let policy_name = rest2[..on_pos].trim().to_lowercase();
+                let table_name = rest2[on_pos + 4..].trim().trim_end_matches(';').to_lowercase();
+                return Some(Ok(BoundStatement::DropPolicy { policy_name, table_name, if_exists }));
+            }
+        }
+
+        // ── SHOW POLICIES [ON <table>] ──
+        if upper.starts_with("SHOW POLICIES") {
+            let rest = upper["SHOW POLICIES".len()..].trim();
+            let table_name = if rest.starts_with("ON ") {
+                Some(rest[3..].trim().trim_end_matches(';').to_lowercase())
+            } else {
+                None
+            };
+            return Some(Ok(BoundStatement::ShowPolicies { table_name }));
+        }
+
+        // ── CREATE REPLICATION SLOT <name> LOGICAL <plugin> ──
+        if upper.starts_with("CREATE REPLICATION SLOT ") {
+            let rest = trimmed["CREATE REPLICATION SLOT ".len()..].trim();
+            let upper_rest = rest.to_uppercase();
+            let logical_pos = upper_rest.find(" LOGICAL ").unwrap_or(upper_rest.find(" LOGICAL").unwrap_or(usize::MAX));
+            if logical_pos != usize::MAX {
+                let slot_name = rest[..logical_pos].trim().to_lowercase();
+                let plugin = rest[logical_pos..].trim().to_uppercase().trim_start_matches("LOGICAL").trim().to_lowercase();
+                let plugin = plugin.trim_end_matches(';').to_owned();
+                return Some(Ok(BoundStatement::CreateReplicationSlot { slot_name, plugin }));
+            } else {
+                // CREATE REPLICATION SLOT <name>  (default plugin = pgoutput)
+                let slot_name = rest.trim_end_matches(';').to_lowercase();
+                return Some(Ok(BoundStatement::CreateReplicationSlot { slot_name, plugin: "pgoutput".to_owned() }));
+            }
+        }
+
+        // ── DROP REPLICATION SLOT <name> ──
+        if upper.starts_with("DROP REPLICATION SLOT ") {
+            let slot_name = trimmed["DROP REPLICATION SLOT ".len()..].trim().trim_end_matches(';').to_lowercase();
+            return Some(Ok(BoundStatement::DropReplicationSlot { slot_name }));
+        }
+
+        // ── SHOW REPLICATION SLOTS ──
+        if upper.starts_with("SHOW REPLICATION SLOTS") {
+            return Some(Ok(BoundStatement::ShowReplicationSlots));
+        }
+
+        // ── SHOW AUDIT LOG ... ──
+        if upper.starts_with("SHOW AUDIT LOG") {
+            let rest = upper["SHOW AUDIT LOG".len()..].trim();
+            if rest.starts_with("FOR TABLE ") {
+                let after = rest["FOR TABLE ".len()..].trim();
+                let (table_part, limit) = if let Some(lp) = after.to_uppercase().find(" LIMIT ") {
+                    let t = after[..lp].trim().trim_end_matches(';').to_lowercase();
+                    let l = after[lp + 7..].trim().trim_end_matches(';').parse::<usize>().unwrap_or(100);
+                    (t, l)
+                } else {
+                    (after.trim_end_matches(';').to_lowercase(), 100)
+                };
+                return Some(Ok(BoundStatement::ShowAuditLogForTable { table_name: table_part, limit }));
+            }
+            let limit = if let Some(lp) = rest.find("LIMIT ").or_else(|| rest.find("limit ")) {
+                rest[lp + 6..].trim().trim_end_matches(';').parse::<usize>().unwrap_or(100)
+            } else {
+                100
+            };
+            return Some(Ok(BoundStatement::ShowAuditLog { limit }));
+        }
+
         // ── DROP TYPE [IF EXISTS] name ──
         if upper.starts_with("DROP TYPE ") {
             let rest = trimmed[10..].trim();
@@ -1301,10 +1462,42 @@ impl Binder {
             dynamic_defaults,
         };
 
+        let partition_spec = Self::parse_partition_spec(create.partition_by.as_deref());
+
         Ok(BoundStatement::CreateTable(BoundCreateTable {
             schema,
             if_not_exists: create.if_not_exists,
+            partition_spec,
         }))
+    }
+
+    fn parse_partition_spec(partition_by: Option<&ast::Expr>) -> Option<crate::types::BoundPartitionSpec> {
+        use crate::types::{BoundPartitionSpec, PartitionStrategy};
+        let expr = partition_by?;
+        if let ast::Expr::Function(f) = expr {
+            let fname = f.name.to_string().to_uppercase();
+            let strategy = match fname.as_str() {
+                "RANGE" => PartitionStrategy::Range,
+                "LIST"  => PartitionStrategy::List,
+                "HASH"  => PartitionStrategy::Hash,
+                _ => return None,
+            };
+            let key_column = match &f.args {
+                ast::FunctionArguments::List(lst) => lst.args.first().and_then(|a| {
+                    if let ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
+                        ast::Expr::Identifier(ident),
+                    )) = a
+                    {
+                        Some(ident.value.clone())
+                    } else {
+                        None
+                    }
+                })?,
+                _ => return None,
+            };
+            return Some(BoundPartitionSpec { strategy, key_column });
+        }
+        None
     }
 
     fn bind_alter_table(

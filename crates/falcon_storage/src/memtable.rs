@@ -221,6 +221,9 @@ pub struct MemTable {
     pub(crate) pk_order: RwLock<BTreeSet<PrimaryKey>>,
     /// GIN inverted indexes for tsvector columns: lexeme → set of PKs.
     pub gin_indexes: RwLock<Vec<GinIndex>>,
+    /// Large-memory mode: skip pk_order writes on INSERT hot path.
+    /// pk_order is rebuilt lazily on the first range-scan request.
+    pub(crate) large_mem_mode: bool,
 }
 
 /// GIN (Generalized Inverted Index) for tsvector columns.
@@ -512,6 +515,39 @@ impl MemTable {
             analyze_threshold: AtomicU64::new(500),
             pk_order: RwLock::new(BTreeSet::new()),
             gin_indexes: RwLock::new(Vec::new()),
+            large_mem_mode: false,
+        }
+    }
+
+    /// High-concurrency constructor for nodes with >512 GB RAM.
+    /// Uses more DashMap shards and a larger initial capacity to match
+    /// CockroachDB's in-memory engine behaviour under heavy parallelism.
+    /// `dashmap_shards` must be a power of 2 (default: 4096).
+    /// `capacity_hint` is the estimated max row count per table.
+    /// `skip_pk_order` skips BTreeSet updates on INSERT hot path.
+    pub fn new_large_mem(
+        schema: TableSchema,
+        dashmap_shards: usize,
+        capacity_hint: usize,
+        skip_pk_order: bool,
+    ) -> Self {
+        let shards = dashmap_shards.next_power_of_two().max(256);
+        Self {
+            schema,
+            data: DashMap::with_capacity_and_hasher_and_shard_amount(
+                capacity_hint,
+                Default::default(),
+                shards,
+            ),
+            secondary_indexes: RwLock::new(Vec::new()),
+            has_secondary_idx: AtomicBool::new(false),
+            gc_candidates: AtomicU64::new(0),
+            committed_row_count: AtomicI64::new(0),
+            rows_modified: AtomicU64::new(0),
+            analyze_threshold: AtomicU64::new(500),
+            pk_order: RwLock::new(BTreeSet::new()),
+            gin_indexes: RwLock::new(Vec::new()),
+            large_mem_mode: skip_pk_order,
         }
     }
 
@@ -960,7 +996,7 @@ impl MemTable {
                 .fetch_sub(-row_delta, AtomicOrdering::Relaxed);
         }
 
-        if !pk_inserts.is_empty() || !pk_deletes.is_empty() {
+        if !self.large_mem_mode && (!pk_inserts.is_empty() || !pk_deletes.is_empty()) {
             let mut pk_set = self.pk_order.write();
             for pk in pk_inserts {
                 pk_set.insert(pk);
@@ -1020,7 +1056,7 @@ impl MemTable {
                 .fetch_sub(-row_delta, AtomicOrdering::Relaxed);
         }
 
-        if !pk_inserts.is_empty() || !pk_deletes.is_empty() {
+        if !self.large_mem_mode && (!pk_inserts.is_empty() || !pk_deletes.is_empty()) {
             let mut pk_set = self.pk_order.write();
             for pk in pk_inserts {
                 pk_set.insert(pk);
@@ -1215,6 +1251,16 @@ impl MemTable {
             return vec![];
         }
 
+        // Large-mem mode: pk_order is not maintained on inserts — rebuild once on first scan.
+        if self.large_mem_mode {
+            let mut pk_set = self.pk_order.write();
+            if pk_set.is_empty() {
+                for entry in &self.data {
+                    pk_set.insert(entry.key().clone());
+                }
+            }
+        }
+
         // Fast path: use ordered PK index (O(K) point lookups instead of O(N) scan)
         let pk_set = self.pk_order.read();
         if !pk_set.is_empty() {
@@ -1302,6 +1348,16 @@ impl MemTable {
     ) -> Vec<(PrimaryKey, OwnedRow)> {
         let in_range =
             |pk: &[u8]| -> bool { start.is_none_or(|s| pk >= s) && end.is_none_or(|e| pk < e) };
+
+        // Large-mem mode: rebuild pk_order lazily on first range-scan.
+        if self.large_mem_mode {
+            let mut pk_set = self.pk_order.write();
+            if pk_set.is_empty() {
+                for entry in &self.data {
+                    pk_set.insert(entry.key().clone());
+                }
+            }
+        }
 
         let pk_set = self.pk_order.read();
         if !pk_set.is_empty() {
