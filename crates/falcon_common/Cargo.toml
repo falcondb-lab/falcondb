@@ -1,0 +1,23 @@
+[package]
+name = "falcon_common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+toml.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+xxhash-rust.workspace = true
+tracing.workspace = true
+smallvec = { workspace = true, features = ["serde", "union", "const_new"] }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "bench_datum"
+harness = false

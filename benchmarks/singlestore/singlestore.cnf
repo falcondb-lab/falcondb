@@ -1,0 +1,37 @@
+# ============================================================================
+# FalconDB Benchmark — SingleStore (MemSQL) configuration
+# ============================================================================
+#
+# Fair-comparison tuning against FalconDB / PG / VoltDB.
+# SingleStore is a distributed, in-memory + columnstore hybrid database.
+#
+# This config targets a SINGLE-NODE deployment for apple-to-apple comparison.
+#
+# Prerequisites:
+#   - SingleStore (sdb-deploy or Docker) installed
+#   - memsql/singlestoredb-server image or singlestore-client on PATH
+# ============================================================================
+
+[server]
+# Memory: 2 GB maximum memory to match other engines
+maximum_memory                = 2048
+
+# Buffer pool: rowstore buffer pool
+rowstore_buffer_pool_size     = 1073741824
+
+# Connections
+max_connections               = 100
+
+# Durability: synchronous commit (match PG fsync / VoltDB sync cmd log)
+sync_permissions              = ON
+redundancy_level              = 1
+
+# Snapshot frequency: ~5 min (match PG checkpoint_timeout)
+snapshot_trigger_size          = 2147483648
+
+# Disable query compilation cache for fair cold-start comparison
+# (remove this line if testing warm-cache behavior)
+# code_gen                    = off
+
+# Logging: minimal (match PG log_min_duration_statement = -1)
+# log_slow_queries            = OFF

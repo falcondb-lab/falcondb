@@ -1,0 +1,302 @@
+{
+  "_comment": "FalconDB Native Protocol Golden Vectors — cross-language validation",
+  "_version": "0.1",
+  "_endianness": "little-endian",
+  "_frame_format": "[msg_type:u8][length:u32 LE][payload:length bytes]",
+  "vectors": [
+    {
+      "name": "ping",
+      "description": "Empty Ping message",
+      "msg_type": "0x20",
+      "payload_hex": "",
+      "frame_hex": "2000000000"
+    },
+    {
+      "name": "pong",
+      "description": "Empty Pong message",
+      "msg_type": "0x21",
+      "payload_hex": "",
+      "frame_hex": "2100000000"
+    },
+    {
+      "name": "disconnect",
+      "description": "Graceful disconnect",
+      "msg_type": "0x30",
+      "payload_hex": "",
+      "frame_hex": "3000000000"
+    },
+    {
+      "name": "disconnect_ack",
+      "description": "Disconnect acknowledgement",
+      "msg_type": "0x31",
+      "payload_hex": "",
+      "frame_hex": "3100000000"
+    },
+    {
+      "name": "auth_ok",
+      "description": "Authentication success",
+      "msg_type": "0x05",
+      "payload_hex": "",
+      "frame_hex": "0500000000"
+    },
+    {
+      "name": "start_tls",
+      "description": "TLS upgrade request",
+      "msg_type": "0xFE",
+      "payload_hex": "",
+      "frame_hex": "fe00000000"
+    },
+    {
+      "name": "start_tls_ack",
+      "description": "TLS upgrade acknowledgement",
+      "msg_type": "0xFF",
+      "payload_hex": "",
+      "frame_hex": "ff00000000"
+    },
+    {
+      "name": "auth_fail_empty",
+      "description": "Auth failure with empty reason",
+      "msg_type": "0x06",
+      "payload_hex": "000000",
+      "notes": "u16 LE length=0 for empty string"
+    },
+    {
+      "name": "auth_request_password_no_challenge",
+      "description": "Password auth request with no challenge",
+      "msg_type": "0x03",
+      "payload_hex": "00",
+      "notes": "auth_method=0 (password), no challenge bytes"
+    },
+    {
+      "name": "auth_response_password",
+      "description": "Password auth response with credential 'secret'",
+      "msg_type": "0x04",
+      "payload_hex": "00736563726574",
+      "notes": "auth_method=0, credential='secret' (6 bytes ASCII)"
+    },
+    {
+      "name": "error_fenced_epoch",
+      "description": "FENCED_EPOCH error response",
+      "msg_type": "0x12",
+      "fields": {
+        "request_id": 0,
+        "error_code": 2001,
+        "sqlstate": "F0001",
+        "retryable": true,
+        "server_epoch": 100,
+        "message": "stale epoch"
+      }
+    },
+    {
+      "name": "error_syntax",
+      "description": "Syntax error response",
+      "msg_type": "0x12",
+      "fields": {
+        "request_id": 1,
+        "error_code": 1000,
+        "sqlstate": "42601",
+        "retryable": false,
+        "server_epoch": 1,
+        "message": "parse error"
+      }
+    },
+    {
+      "name": "query_select_1",
+      "description": "Simple SELECT 1 query request",
+      "msg_type": "0x10",
+      "fields": {
+        "request_id": 1,
+        "epoch": 0,
+        "sql": "SELECT 1",
+        "num_params": 0,
+        "session_flags": 1
+      },
+      "notes": "session_flags=1 means AUTOCOMMIT"
+    },
+    {
+      "name": "query_with_text_param",
+      "description": "Query with a text parameter",
+      "msg_type": "0x10",
+      "fields": {
+        "request_id": 99,
+        "epoch": 0,
+        "sql": "SELECT * FROM t WHERE name = ?",
+        "num_params": 1,
+        "params": [{"type_id": "0x05", "value": "hello"}],
+        "session_flags": 0
+      }
+    },
+    {
+      "name": "query_response_single_int",
+      "description": "Query response with one INT64 column, one row",
+      "msg_type": "0x11",
+      "fields": {
+        "request_id": 1,
+        "columns": [{"name": "?column?", "type_id": "0x03", "nullable": false, "precision": 0, "scale": 0}],
+        "num_rows": 1,
+        "rows": [[1]],
+        "rows_affected": 0
+      }
+    },
+    {
+      "name": "query_response_empty",
+      "description": "Empty query response (no rows)",
+      "msg_type": "0x11",
+      "fields": {
+        "request_id": 5,
+        "columns": [{"name": "id", "type_id": "0x03", "nullable": false, "precision": 0, "scale": 0}],
+        "num_rows": 0,
+        "rows": [],
+        "rows_affected": 0
+      }
+    },
+    {
+      "name": "query_response_with_nulls",
+      "description": "Query response with NULL values in rows",
+      "msg_type": "0x11",
+      "fields": {
+        "request_id": 7,
+        "columns": [
+          {"name": "id", "type_id": "0x03", "nullable": false, "precision": 0, "scale": 0},
+          {"name": "name", "type_id": "0x05", "nullable": true, "precision": 0, "scale": 0}
+        ],
+        "num_rows": 2,
+        "rows": [[1, "alice"], [2, null]],
+        "rows_affected": 0
+      },
+      "notes": "Second row has NULL in name column; null bitmap bit 1 set"
+    },
+    {
+      "name": "batch_request_insert",
+      "description": "Batch INSERT with 3 rows",
+      "msg_type": "0x13",
+      "fields": {
+        "request_id": 100,
+        "epoch": 5,
+        "sql": "INSERT INTO t (id, name) VALUES (?, ?)",
+        "column_types": ["0x03", "0x05"],
+        "num_rows": 3,
+        "rows": [[1, "a"], [2, "b"], [3, null]],
+        "options": 0
+      }
+    },
+    {
+      "name": "batch_response_ok",
+      "description": "Batch response with all rows successful",
+      "msg_type": "0x14",
+      "fields": {
+        "request_id": 100,
+        "counts": [1, 1, 1],
+        "has_error": false
+      }
+    },
+    {
+      "name": "batch_response_partial_error",
+      "description": "Batch response with partial failure",
+      "msg_type": "0x14",
+      "fields": {
+        "request_id": 100,
+        "counts": [1, -1],
+        "has_error": true,
+        "error": {
+          "request_id": 100,
+          "error_code": 3000,
+          "sqlstate": "XX000",
+          "retryable": false,
+          "server_epoch": 5,
+          "message": "constraint violation on row 2"
+        }
+      }
+    },
+    {
+      "name": "client_hello_minimal",
+      "description": "Minimal ClientHello with no features or params",
+      "msg_type": "0x01",
+      "fields": {
+        "version_major": 0,
+        "version_minor": 1,
+        "feature_flags": 0,
+        "client_name": "test",
+        "database": "db",
+        "user": "admin",
+        "nonce_hex": "00000000000000000000000000000000",
+        "num_params": 0
+      }
+    },
+    {
+      "name": "client_hello_full",
+      "description": "ClientHello with all features and params",
+      "msg_type": "0x01",
+      "fields": {
+        "version_major": 0,
+        "version_minor": 1,
+        "feature_flags": "0x7C",
+        "feature_flags_decoded": ["BATCH_INGEST", "PIPELINE", "EPOCH_FENCING", "BINARY_PARAMS"],
+        "client_name": "falcondb-jdbc/0.1",
+        "database": "testdb",
+        "user": "admin",
+        "nonce_hex": "0102030405060708090a0b0c0d0e0f10",
+        "params": [
+          {"key": "app", "value": "myapp"},
+          {"key": "timeout", "value": "30000"}
+        ]
+      }
+    },
+    {
+      "name": "server_hello",
+      "description": "ServerHello response",
+      "msg_type": "0x02",
+      "fields": {
+        "version_major": 0,
+        "version_minor": 1,
+        "feature_flags": "0x1C",
+        "feature_flags_decoded": ["BATCH_INGEST", "PIPELINE", "EPOCH_FENCING"],
+        "server_epoch": 42,
+        "server_node_id": 7,
+        "server_nonce_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "params": [
+          {"key": "server_version", "value": "1.0.0-rc.1"}
+        ]
+      }
+    }
+  ],
+  "type_ids": {
+    "NULL": "0x00",
+    "BOOLEAN": "0x01",
+    "INT32": "0x02",
+    "INT64": "0x03",
+    "FLOAT64": "0x04",
+    "TEXT": "0x05",
+    "TIMESTAMP": "0x06",
+    "DATE": "0x07",
+    "JSONB": "0x08",
+    "DECIMAL": "0x09",
+    "TIME": "0x0A",
+    "INTERVAL": "0x0B",
+    "UUID": "0x0C",
+    "BYTEA": "0x0D",
+    "ARRAY": "0x0E"
+  },
+  "error_codes": {
+    "SYNTAX_ERROR": 1000,
+    "INVALID_PARAM": 1001,
+    "NOT_LEADER": 2000,
+    "FENCED_EPOCH": 2001,
+    "READ_ONLY": 2002,
+    "SERIALIZATION_CONFLICT": 2003,
+    "INTERNAL_ERROR": 3000,
+    "TIMEOUT": 3001,
+    "OVERLOADED": 3002,
+    "AUTH_FAILED": 4000,
+    "PERMISSION_DENIED": 4001
+  },
+  "feature_flags": {
+    "COMPRESSION_LZ4": "bit 0",
+    "COMPRESSION_ZSTD": "bit 1",
+    "BATCH_INGEST": "bit 2",
+    "PIPELINE": "bit 3",
+    "EPOCH_FENCING": "bit 4",
+    "TLS": "bit 5",
+    "BINARY_PARAMS": "bit 6"
+  }
+}

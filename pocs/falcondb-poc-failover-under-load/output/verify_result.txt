@@ -1,0 +1,20 @@
+=== FAILOVER VALIDATION REPORT ===
+Primary WAL rows: 9403
+Replica rows: 48458
+Client committed: 50000
+
+--- WAL Durability (primary crash recovery) ---
+Missing (client committed <= 9402 but not in WAL): 0
+Phantom (in WAL but not client committed): 1
+Phantom sample: 0
+WAL VERDICT: PASS
+
+--- Replica Integrity (failover + continued writes) ---
+Missing from replica: 1543
+Phantom on replica: 1
+Replication lag lost: 1543 markers committed on primary but not replicated
+
+--- Summary ---
+WAL durability: ZERO DATA LOSS
+Failover availability: Writer reconnected and completed all 50000 markers
+Replication lag window: 1543 markers

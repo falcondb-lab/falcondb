@@ -1,0 +1,259 @@
+name: Performance Gate
+
+on:
+  pull_request:
+    paths:
+      - 'crates/falcon_storage/**'
+      - 'crates/falcon_txn/**'
+      - 'crates/falcon_protocol_pg/**'
+      - 'crates/falcon_executor/**'
+      - 'crates/falcon_bench/**'
+      - 'crates/falcon_common/**'
+
+# Cancel in-flight bench runs for the same PR
+concurrency:
+  group: bench-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Quick smoke bench (runs on every PR, GitHub-hosted runner) ─────────────
+  bench-smoke:
+    name: Bench Smoke (CI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history for baseline lookup
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: bench-${{ runner.os }}-
+
+      - name: Build bench binary (release)
+        run: cargo build --release -p falcon_bench
+
+      - name: Run CI smoke suite
+        run: |
+          cargo run --release -p falcon_bench -- \
+            --ops 20000 \
+            --threads 8 \
+            --read-pct 70 \
+            --export json \
+            > bench_results_raw.json 2>&1 || true
+
+      - name: Normalize results to BenchResults format
+        run: |
+          python3 - <<'EOF'
+          import json, os, socket, subprocess, datetime
+
+          raw_path = "bench_results_raw.json"
+          out_path = "bench_results.json"
+
+          try:
+              with open(raw_path) as f:
+                  raw = json.load(f)
+          except Exception:
+              raw = {}
+
+          commit = subprocess.check_output(["git","rev-parse","--short","HEAD"],
+                                            text=True).strip()
+          output = {
+              "run_id":     commit + "_ci",
+              "git_commit": commit,
+              "timestamp":  datetime.datetime.utcnow().isoformat() + "Z",
+              "machine":    "github-actions",
+              "results":    raw if isinstance(raw, dict) and "results" not in raw
+                            else raw.get("results", {}),
+          }
+          # If results is still flat, wrap it
+          if "results" not in output or not output["results"]:
+              output["results"] = {}
+
+          with open(out_path, "w") as f:
+              json.dump(output, f, indent=2)
+          print(f"Normalized: {len(output['results'])} results")
+          EOF
+
+      - name: Check regression against baseline
+        id: regression
+        run: |
+          python3 benchmarks/scripts/ci_gate.py \
+            --baseline benchmarks/baselines/main.json \
+            --current  bench_results.json \
+            --tps-fail   5.0 \
+            --p99-fail  10.0 \
+            --wal-fail  15.0 \
+            --alloc-warn 20.0 \
+            --noise-floor 2.0 \
+            --summary-out bench_summary.json \
+          && echo "gate_passed=true" >> "$GITHUB_OUTPUT" \
+          || echo "gate_passed=false" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Post PR comment with results
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '## 🏁 FalconDB Performance Gate\n\n';
+            try {
+              const summary = JSON.parse(fs.readFileSync('bench_summary.json', 'utf8'));
+              body = summary.markdown_summary || body;
+            } catch (e) {
+              body += '⚠️ Could not parse bench summary.\n';
+            }
+
+            // Find and update existing comment or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              c.body.includes('FalconDB Performance Gate')
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Upload bench artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results-${{ github.event.pull_request.number }}
+          path: |
+            bench_results.json
+            bench_summary.json
+
+      - name: Enforce gate
+        if: steps.regression.outputs.gate_passed == 'false'
+        run: |
+          echo "❌ Performance gate FAILED. See PR comment for details."
+          exit 1
+
+  # ── Full bench suite (only on self-hosted bench runner, opt-in label) ───────
+  bench-full:
+    name: Bench Full Suite (self-hosted)
+    runs-on: [self-hosted, bench-runner]
+    timeout-minutes: 60
+    # Only run when the 'run-full-bench' label is added to the PR
+    if: contains(github.event.pull_request.labels.*.name, 'run-full-bench')
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: OS performance tuning
+        run: |
+          # Disable CPU frequency scaling for consistent measurements
+          echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor \
+            2>/dev/null || echo "cpufreq tuning skipped (no root or not supported)"
+          # Disable transparent huge pages
+          echo never | sudo tee /sys/kernel/mm/transparent_hugepage/enabled \
+            2>/dev/null || true
+
+      - name: Build bench (release, LTO thin)
+        run: cargo build --profile release-lto -p falcon_bench
+
+      - name: Run Criterion micro benchmarks
+        run: |
+          cargo bench -p falcon_protocol_pg --bench bench_codec    -- --output-format json 2>/dev/null | tee criterion_micro.json || true
+          cargo bench -p falcon_storage     --bench bench_memtable -- --output-format json 2>/dev/null | tee criterion_storage.json || true
+          cargo bench -p falcon_storage     --bench bench_mvcc     -- --output-format json 2>/dev/null | tee criterion_mvcc.json || true
+
+      - name: Run full E2E workload suite (32 threads, 30s each)
+        run: |
+          cargo run --profile release-lto -p falcon_bench -- \
+            --ops 0 \
+            --threads 32 \
+            --read-pct 70 \
+            --export json \
+            > bench_e2e_32t.json
+
+      - name: Run scalability curve (1→64 threads)
+        run: |
+          for THREADS in 1 2 4 8 16 32 64; do
+            echo "→ threads=$THREADS"
+            cargo run --profile release-lto -p falcon_bench -- \
+              --ops 0 \
+              --threads $THREADS \
+              --read-pct 70 \
+              --export json \
+              > bench_scale_${THREADS}t.json
+          done
+
+      - name: Merge results and check regression
+        run: |
+          python3 - <<'EOF'
+          import json, glob, subprocess, datetime, socket
+
+          results = {}
+          for f in glob.glob("bench_*.json"):
+              try:
+                  data = json.load(open(f))
+                  r = data if "results" not in data else data.get("results", {})
+                  results.update(r)
+              except Exception as e:
+                  print(f"Skip {f}: {e}")
+
+          commit = subprocess.check_output(["git","rev-parse","--short","HEAD"],
+                                            text=True).strip()
+          merged = {
+              "run_id":     commit + "_full",
+              "git_commit": commit,
+              "timestamp":  datetime.datetime.utcnow().isoformat() + "Z",
+              "machine":    socket.gethostname(),
+              "results":    results,
+          }
+          with open("bench_results_full.json", "w") as f:
+              json.dump(merged, f, indent=2)
+          print(f"Merged {len(results)} bench results")
+          EOF
+
+          python3 benchmarks/scripts/ci_gate.py \
+            --baseline benchmarks/baselines/main.json \
+            --current  bench_results_full.json \
+            --tps-fail   5.0 \
+            --p99-fail  10.0 \
+            --wal-fail  15.0 \
+            --summary-out bench_summary_full.json
+
+      - name: Upload full bench artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-full-${{ github.event.pull_request.number }}
+          path: |
+            bench_*.json
+            bench_summary_full.json

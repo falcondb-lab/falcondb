@@ -1,0 +1,62 @@
+[Unit]
+Description=FalconDB OLTP Database
+Documentation=https://github.com/falcondb-lab/falcondb
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=falcondb
+Group=falcondb
+WorkingDirectory=/var/lib/falcondb
+
+# Core process
+ExecStart=/opt/falcondb/bin/falcon -c /etc/falcondb/falcon.toml
+ExecReload=/bin/kill -HUP $MAINPID
+
+# ── Resource Limits (cgroup v2) ──
+# CPU: guarantee 4 cores, allow burst to 8
+CPUQuota=800%
+CPUWeight=200
+
+# Memory: hard limit prevents OOM from affecting other services
+MemoryMax=24G
+MemoryHigh=20G
+MemorySwapMax=0
+
+# I/O: WAL writes get priority
+IOWeight=500
+
+# ── Process Limits ──
+LimitNOFILE=65536
+LimitNPROC=4096
+LimitMEMLOCK=infinity
+LimitCORE=infinity
+
+# ── OOM & Crash Behavior ──
+OOMScoreAdjust=-900
+OOMPolicy=continue
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=60
+
+# ── Security Hardening ──
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/falcondb /var/log/falcondb
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+
+# ── Scheduling ──
+Nice=-5
+CPUSchedulingPolicy=other
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+
+[Install]
+WantedBy=multi-user.target

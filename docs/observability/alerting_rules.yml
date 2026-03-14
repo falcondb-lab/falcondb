@@ -1,0 +1,301 @@
+# FalconDB Prometheus Alerting Rules
+# Import into Prometheus via rule_files in prometheus.yml
+
+groups:
+  # ── Cluster Health ──────────────────────────────────────────────────────
+  - name: falcondb_cluster_health
+    interval: 15s
+    rules:
+      - alert: ClusterDegraded
+        expr: falcon_cluster_health_status == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "FalconDB cluster is degraded"
+          description: "Cluster health status has been degraded for >2m. Check node liveness and shard leadership."
+
+      - alert: ClusterCritical
+        expr: falcon_cluster_health_status >= 2
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "FalconDB cluster is in critical state"
+          description: "Cluster health is critical. Immediate investigation required."
+
+      - alert: NodeDown
+        expr: falcon_cluster_alive_nodes < falcon_cluster_total_nodes
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "FalconDB node(s) offline"
+          description: "{{ $value }} of {{ with query \"falcon_cluster_total_nodes\" }}{{ . | first | value }}{{ end }} nodes are alive."
+
+      - alert: ShardLeaderless
+        expr: falcon_cluster_shards_with_leader < falcon_cluster_total_shards
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "FalconDB shard(s) have no leader"
+          description: "{{ $value }} shards have a leader, but total shards is higher. Data may be unavailable."
+
+  # ── Replication ─────────────────────────────────────────────────────────
+  - name: falcondb_replication
+    interval: 15s
+    rules:
+      - alert: ReplicationLagHigh
+        expr: falcon_cluster_replication_lag_max_ms > 2000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "FalconDB replication lag >2s"
+          description: "Maximum replication lag is {{ $value }}ms. Check replica health and network."
+
+      - alert: ReplicationLagCritical
+        expr: falcon_cluster_replication_lag_max_ms > 10000
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "FalconDB replication lag >10s"
+          description: "Maximum replication lag is {{ $value }}ms. Replicas may be falling behind dangerously."
+
+  # ── Epoch Fencing ───────────────────────────────────────────────────────
+  - name: falcondb_epoch_fencing
+    interval: 15s
+    rules:
+      - alert: StaleEpochWritesDetected
+        expr: rate(falcon_epoch_fence_rejections_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stale-epoch writes being rejected"
+          description: "Epoch fencing is rejecting writes from stale leaders. This may indicate a recent failover or split-brain attempt."
+
+      - alert: StaleEpochWritesSustained
+        expr: rate(falcon_epoch_fence_rejections_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Sustained stale-epoch write rejections"
+          description: "High rate of epoch fence rejections ({{ $value }}/s). A stale leader may still be active."
+
+  # ── Gateway Routing ─────────────────────────────────────────────────────
+  - name: falcondb_gateway
+    interval: 15s
+    rules:
+      - alert: GatewayNoRouteRejections
+        expr: rate(falcon_gateway_reject_no_route_total[5m]) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway rejecting requests with NO_ROUTE"
+          description: "Gateway is rejecting requests because shard routing is unavailable."
+
+      - alert: GatewayOverloaded
+        expr: rate(falcon_gateway_reject_overloaded_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway is overloaded"
+          description: "Gateway is rejecting requests due to overload ({{ $value }}/s)."
+
+      - alert: GatewayForwardFailureRate
+        expr: falcon_gateway_forward_failed_total / (falcon_gateway_forward_total + 1) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway forward failure rate >10%"
+          description: "More than 10% of forwarded requests are failing."
+
+      - alert: TopologyCacheMissRateHigh
+        expr: falcon_topology_cache_misses / (falcon_topology_cache_hits + falcon_topology_cache_misses + 1) > 0.3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Topology cache miss rate >30%"
+          description: "High topology cache miss rate indicates frequent topology changes or cold cache."
+
+  # ── Client Discovery ────────────────────────────────────────────────────
+  - name: falcondb_client_discovery
+    interval: 15s
+    rules:
+      - alert: DiscoveryEventsDropped
+        expr: rate(falcon_discovery_events_dropped[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Client discovery events being dropped"
+          description: "Topology change events are being dropped because subscriber queues are full."
+
+      - alert: ClientConnectionFailoversHigh
+        expr: rate(falcon_client_conn_failovers_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High client connection failover rate"
+          description: "Clients are failing over between gateways at {{ $value }}/s."
+
+      - alert: RedirectorBudgetExhausted
+        expr: rate(falcon_redirector_budget_exhausted_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NOT_LEADER redirect budget exhaustions"
+          description: "Clients are exhausting their redirect retry budget, indicating persistent routing problems."
+
+  # ── Shard Migration ─────────────────────────────────────────────────────
+  - name: falcondb_shard_migration
+    interval: 30s
+    rules:
+      - alert: ShardMigrationFailed
+        expr: increase(falcon_shard_migration_failed_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Shard migration failed"
+          description: "A shard migration has failed in the last 10 minutes."
+
+      - alert: ShardMigrationStuck
+        expr: falcon_shard_migration_active > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Shard migration running >30m"
+          description: "An active shard migration has been running for over 30 minutes."
+
+  # ── 2PC ─────────────────────────────────────────────────────────────────
+  - name: falcondb_2pc
+    interval: 15s
+    rules:
+      - alert: TwoPcUnappliedDecisions
+        expr: falcon_2pc_decision_log_unapplied > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "2PC has >10 unapplied decisions"
+          description: "The 2PC coordinator has {{ $value }} decisions that have not been applied to participants."
+
+      - alert: TwoPcHardTimeouts
+        expr: rate(falcon_2pc_hard_timeouts[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "2PC hard timeouts occurring"
+          description: "Cross-shard transactions are hitting hard timeouts. Check participant health."
+
+  # ── Rebalancer ─────────────────────────────────────────────────────────
+  - name: falcondb_rebalancer
+    interval: 30s
+    rules:
+      - alert: RebalancerImbalanceHigh
+        expr: falcon_rebalancer_imbalance_ratio > 2.0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Shard imbalance ratio >2.0 for 10m"
+          description: "Shard load imbalance ratio is {{ $value }}. Rebalancer may be paused or unable to migrate."
+
+      - alert: RebalancerTasksFailing
+        expr: falcon_rebalancer_failed_tasks > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rebalancer migration tasks failing"
+          description: "{{ $value }} migration tasks have failed. Check source/target shard health."
+
+  # ── Replication Streaming ──────────────────────────────────────────────
+  - name: falcondb_repl_streaming
+    interval: 30s
+    rules:
+      - alert: ReplicationChecksumFailures
+        expr: increase(falcon_repl_checksum_failures_total[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Replication segment checksum failures detected"
+          description: "Checksum failures indicate data corruption during replication. Investigate immediately."
+
+  # ── Memory ──────────────────────────────────────────────────────────────
+  - name: falcondb_memory
+    interval: 15s
+    rules:
+      - alert: MemoryPressure
+        expr: falcon_memory_pressure_state == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "FalconDB under memory pressure"
+          description: "Memory pressure state is active. Queries may be throttled."
+
+      - alert: MemoryCritical
+        expr: falcon_memory_pressure_state == 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "FalconDB memory critical"
+          description: "Memory is in critical state. New writes may be rejected."
+
+  # ── Query Performance ───────────────────────────────────────────────────
+  - name: falcondb_query_performance
+    interval: 15s
+    rules:
+      - alert: QueryLatencyP99High
+        expr: histogram_quantile(0.99, rate(falcon_query_duration_us_bucket[5m])) > 50000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Query p99 latency >50ms"
+          description: "The 99th percentile query latency is {{ $value }}µs."
+
+      - alert: SlaViolationsIncreasing
+        expr: rate(falcon_sla_violations_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SLA violations detected"
+          description: "SLA violations are occurring at {{ $value }}/s."
+
+  # ── WAL / Storage ───────────────────────────────────────────────────────
+  - name: falcondb_storage
+    interval: 15s
+    rules:
+      - alert: WalFsyncLatencyHigh
+        expr: falcon_wal_fsync_max_us > 100000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WAL fsync max latency >100ms"
+          description: "Maximum WAL fsync latency is {{ $value }}µs. Check disk I/O."
+
+      - alert: WalBacklogGrowing
+        expr: rate(falcon_wal_backlog_bytes[5m]) > 0 and falcon_wal_backlog_bytes > 104857600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WAL backlog >100MB and growing"
+          description: "WAL backlog is {{ $value }} bytes and increasing."

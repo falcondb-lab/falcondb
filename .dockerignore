@@ -1,0 +1,10 @@
+target/
+.git/
+falcon_data/
+*.msi
+*.zip
+*.tar.gz
+.github/
+evidence/
+tools/
+benchmarks/results/

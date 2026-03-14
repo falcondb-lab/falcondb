@@ -1,0 +1,1900 @@
+//! # Module Status: PRODUCTION
+//! Write-Ahead Log (WAL) — crash-safe durability for all committed transactions.
+//! Core production path: every commit appends to the WAL before client ACK.
+//!
+//! ## Golden Path (OLTP Write — WAL segment)
+//! ```text
+//! StorageEngine.commit_txn()
+//!   → WalWriter.append(WalRecord::InsertRow | UpdateRow | DeleteRow)
+//!   → WalWriter.append(WalRecord::CommitTxn { txn_id, commit_ts })
+//!   → fsync (per SyncMode / CommitPolicy)
+//!   → WAL observer callback → Replication stream
+//! ```
+//!
+//! ## Invariants (enforced, not advisory)
+//! - WAL-1: Monotonic LSN — every record gets a strictly increasing LSN
+//! - WAL-2: Idempotent replay — replaying a record twice = replaying once
+//! - WAL-5: Recovery completeness — committed visible, uncommitted invisible
+//! - WAL-6: CRC32 on every record — corruption detected, not skipped
+//!
+//! ## Prohibited Patterns
+//! - Writing to MemTable without WAL append → violates crash-safety
+//! - Client ACK before WAL fsync (under LocalWalSync policy) → data loss risk
+//! - Replication stream emitting records not yet WAL-durable → phantom commits
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, Read, Seek, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use falcon_common::datum::OwnedRow;
+use falcon_common::error::StorageError;
+use falcon_common::schema::{ColumnDef, TableSchema};
+use falcon_common::types::{TableId, Timestamp, TxnId};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WAL Encryption — transparent per-record AES-256-GCM encryption
+// ═══════════════════════════════════════════════════════════════════════════
+
+pub struct WalEncryption {
+    cipher: aes_gcm::Aes256Gcm,
+}
+
+impl WalEncryption {
+    pub fn from_key(key: &crate::encryption::EncryptionKey) -> Self {
+        use aes_gcm::KeyInit;
+        Self {
+            cipher: aes_gcm::Aes256Gcm::new(key.as_bytes().into()),
+        }
+    }
+
+    pub fn from_key_manager(
+        km: &mut crate::encryption::KeyManager,
+        dek_id: crate::encryption::DekId,
+    ) -> Option<Self> {
+        let key = km.unwrap_dek(dek_id).ok()?;
+        Some(Self::from_key(&key))
+    }
+
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, StorageError> {
+        use aes_gcm::aead::{Aead, OsRng};
+        use rand::RngCore;
+        let mut nonce_bytes = [0u8; crate::encryption::NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+        let ciphertext = self
+            .cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|_| StorageError::Wal("TDE: AES-256-GCM encryption failed".into()))?;
+        let mut out = Vec::with_capacity(crate::encryption::NONCE_LEN + ciphertext.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, StorageError> {
+        use aes_gcm::aead::Aead;
+        if encrypted.len() < crate::encryption::NONCE_LEN + crate::encryption::GCM_TAG_LEN {
+            return Err(StorageError::Wal(
+                "TDE: encrypted WAL record too short".into(),
+            ));
+        }
+        let (nonce_bytes, ciphertext) = encrypted.split_at(crate::encryption::NONCE_LEN);
+        let nonce = aes_gcm::Nonce::from_slice(nonce_bytes);
+        self.cipher.decrypt(nonce, ciphertext).map_err(|_| {
+            StorageError::Wal("TDE: AES-256-GCM decryption failed (auth mismatch)".into())
+        })
+    }
+}
+
+impl std::fmt::Debug for WalEncryption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WalEncryption(AES-256-GCM)")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WAL Device Trait — abstraction over the durable storage backend
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Abstraction over the physical WAL storage backend.
+///
+/// Decouples WAL record serialisation from the I/O path so that future
+/// backends (Windows IOCP, O_DIRECT/raw disk, cloud block storage) can be
+/// swapped in without touching the `WalWriter` logic.
+///
+/// **Invariant**: After `flush()` returns `Ok(())`, all bytes passed to
+/// prior `append()` calls are durable (according to the configured
+/// `SyncMode`).
+pub trait WalDevice: Send + Sync {
+    /// Append raw bytes to the device. Returns the number of bytes written.
+    fn append(&self, data: &[u8]) -> Result<usize, StorageError>;
+
+    /// Flush buffered writes and (depending on `SyncMode`) fsync to disk.
+    fn flush(&self, sync_mode: SyncMode) -> Result<(), StorageError>;
+
+    /// Read `len` bytes starting at `offset` from the device.
+    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, StorageError>;
+
+    /// Current size of the device in bytes.
+    fn size(&self) -> u64;
+
+    /// Rotate to a new segment / file. Returns the new segment identifier.
+    /// Implementations that don't support segmentation can return Ok(0).
+    fn rotate(&self) -> Result<u64, StorageError>;
+}
+
+/// File-based WAL device — the default implementation using POSIX/NTFS files.
+///
+/// This is a thin wrapper that captures the existing `BufWriter<File>` logic
+/// behind the `WalDevice` trait, preserving all existing behaviour.
+pub struct WalDeviceFile {
+    inner: Mutex<WalDeviceFileInner>,
+}
+
+struct WalDeviceFileInner {
+    writer: BufWriter<File>,
+    dir: PathBuf,
+    current_segment: u64,
+    current_size: u64,
+    max_segment_size: u64,
+}
+
+impl WalDeviceFile {
+    /// Open (or create) a WAL device backed by segment files in `dir`.
+    pub fn open(dir: &Path, max_segment_size: u64) -> Result<Self, StorageError> {
+        fs::create_dir_all(dir)?;
+
+        let latest = find_latest_segment_in(dir);
+        let seg_id = latest.unwrap_or(0);
+        let seg_path = dir.join(segment_filename(seg_id));
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&seg_path)?;
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let is_new = file_len == 0;
+        let mut size = file_len;
+
+        let mut writer = BufWriter::new(file);
+        if is_new {
+            writer.write_all(WAL_MAGIC)?;
+            writer.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
+            writer.flush()?;
+            size = WAL_SEGMENT_HEADER_SIZE as u64;
+        }
+
+        Ok(Self {
+            inner: Mutex::new(WalDeviceFileInner {
+                writer,
+                dir: dir.to_path_buf(),
+                current_segment: seg_id,
+                current_size: size,
+                max_segment_size,
+            }),
+        })
+    }
+
+    /// Current segment ID.
+    pub fn current_segment_id(&self) -> u64 {
+        self.inner.lock().current_segment
+    }
+
+    /// WAL directory path.
+    pub fn dir(&self) -> PathBuf {
+        self.inner.lock().dir.clone()
+    }
+}
+
+impl WalDevice for WalDeviceFile {
+    fn append(&self, data: &[u8]) -> Result<usize, StorageError> {
+        let mut inner = self.inner.lock();
+
+        // Check segment rotation
+        if inner.current_size + data.len() as u64 > inner.max_segment_size {
+            self.rotate_inner(&mut inner)?;
+        }
+
+        inner.writer.write_all(data)?;
+        inner.current_size += data.len() as u64;
+        Ok(data.len())
+    }
+
+    fn flush(&self, sync_mode: SyncMode) -> Result<(), StorageError> {
+        let mut inner = self.inner.lock();
+        inner.writer.flush()?;
+        match sync_mode {
+            SyncMode::None => {}
+            SyncMode::FSync | SyncMode::FDataSync => {
+                inner.writer.get_ref().sync_data()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, StorageError> {
+        let inner = self.inner.lock();
+        let seg_path = inner.dir.join(segment_filename(inner.current_segment));
+        let mut file = File::open(&seg_path)?;
+        file.seek(std::io::SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; len];
+        file.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    fn size(&self) -> u64 {
+        self.inner.lock().current_size
+    }
+
+    fn rotate(&self) -> Result<u64, StorageError> {
+        let mut inner = self.inner.lock();
+        self.rotate_inner(&mut inner)
+    }
+}
+
+impl WalDeviceFile {
+    fn rotate_inner(&self, inner: &mut WalDeviceFileInner) -> Result<u64, StorageError> {
+        inner.writer.flush()?;
+        inner.writer.get_ref().sync_data()?;
+
+        inner.current_segment += 1;
+        let new_path = inner.dir.join(segment_filename(inner.current_segment));
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&new_path)?;
+        inner.writer = BufWriter::new(file);
+        inner.writer.write_all(WAL_MAGIC)?;
+        inner.writer.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
+        inner.current_size = WAL_SEGMENT_HEADER_SIZE as u64;
+
+        tracing::debug!("WAL device rotated to segment {}", inner.current_segment);
+        Ok(inner.current_segment)
+    }
+}
+
+/// Helper: find the latest segment file in a directory.
+fn find_latest_segment_in(dir: &Path) -> Option<u64> {
+    let mut max_id = None;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("falcon_") && name.ends_with(".wal") {
+                if let Ok(id) = name[7..name.len() - 4].parse::<u64>() {
+                    max_id = Some(max_id.map_or(id, |cur: u64| cur.max(id)));
+                }
+            }
+        }
+    }
+    max_id
+}
+
+/// WAL format version for compatibility checks during online upgrades.
+///
+/// Increment this when the WalRecord enum changes in a backward-incompatible way.
+/// v3: Added WalRecord::CreateIndex and WalRecord::DropIndex variants.
+/// v4: Eliminated nested JSON — CreateTable, AlterTable, AlterRole now use
+///     native bincode-serialized structs instead of JSON strings.
+pub const WAL_FORMAT_VERSION: u32 = 4;
+
+/// Magic bytes written at the start of each WAL segment for validation.
+pub const WAL_MAGIC: &[u8; 4] = b"FALC";
+
+/// Size of the WAL segment header: magic (4) + format version (4) = 8 bytes.
+pub const WAL_SEGMENT_HEADER_SIZE: usize = 8;
+
+/// Typed ALTER TABLE operation for WAL serialization.
+///
+/// Replaces the previous `operation_json: String` field, eliminating
+/// nested JSON inside bincode-serialized WAL records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AlterTableOp {
+    /// Add a new column to the table.
+    AddColumn { column: ColumnDef },
+    /// Drop a column by name.
+    DropColumn { column_name: String },
+    /// Rename a column.
+    RenameColumn { old_name: String, new_name: String },
+    /// Rename the table itself.
+    RenameTable { new_name: String },
+    /// Change a column's data type.
+    ChangeColumnType {
+        column_name: String,
+        new_type: falcon_common::types::DataType,
+    },
+    /// Set NOT NULL constraint on a column.
+    SetNotNull { column_name: String },
+    /// Drop NOT NULL constraint from a column.
+    DropNotNull { column_name: String },
+    /// Set a default value for a column.
+    SetDefault {
+        column_name: String,
+        default_value: falcon_common::datum::Datum,
+    },
+    /// Drop the default value from a column.
+    DropDefault { column_name: String },
+}
+
+/// Typed ALTER ROLE options for WAL serialization.
+///
+/// Replaces the previous `options_json: String` field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlterRoleOpts {
+    pub password: Option<Option<String>>,
+    pub can_login: Option<bool>,
+    pub is_superuser: Option<bool>,
+    pub can_create_db: Option<bool>,
+    pub can_create_role: Option<bool>,
+}
+
+/// A single WAL record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WalRecord {
+    /// Begin a transaction.
+    ///
+    /// # Deprecated — do not write in new code
+    /// MVCC does not require a WAL begin marker: the first DML record for a
+    /// transaction implicitly begins it, and the commit record is the only
+    /// durability-critical boundary.  Writing `BeginTxn` wastes ~9 bytes per
+    /// transaction on the hot append path.  This variant is retained for:
+    /// - WAL format v4 backward-compatibility (existing segments can replay it)
+    /// - CDC bridge (`cdc_wal_bridge`) which uses it to open inflight-txn entries
+    ///
+    /// Recovery (`StorageEngine::recover`) treats it as a no-op.
+    /// New production code must NOT append this record.
+    #[deprecated(since = "0.5.0", note = "MVCC does not need a WAL begin marker; do not write in new code")]
+    BeginTxn { txn_id: TxnId },
+    /// Prepare a global transaction (2PC phase-1).
+    PrepareTxn { txn_id: TxnId },
+    /// Prepare with named GID for `PREPARE TRANSACTION 'gid'` crash recovery.
+    PrepareTxnNamed { txn_id: TxnId, gid: String },
+    /// Prepare with coordinator mapping for cross-node 2PC recovery.
+    PrepareTxn2pc {
+        txn_id: TxnId,
+        coord_txn_id: u64,
+        shard_id: u64,
+    },
+    /// Insert a row.
+    Insert {
+        txn_id: TxnId,
+        table_id: TableId,
+        row: OwnedRow,
+    },
+    /// Batch insert multiple rows (single WAL record for performance).
+    BatchInsert {
+        txn_id: TxnId,
+        table_id: TableId,
+        rows: Vec<OwnedRow>,
+    },
+    /// Update a row (full row replacement).
+    Update {
+        txn_id: TxnId,
+        table_id: TableId,
+        pk: Vec<u8>,
+        new_row: OwnedRow,
+    },
+    /// DDL backfill: in-place replace of committed row data (no MVCC txn).
+    /// Replayed by calling replace_latest() — safe to re-apply idempotently.
+    DdlBackfillUpdate {
+        table_id: TableId,
+        pk: Vec<u8>,
+        new_row: OwnedRow,
+    },
+    /// Delete a row.
+    Delete {
+        txn_id: TxnId,
+        table_id: TableId,
+        pk: Vec<u8>,
+    },
+    /// Commit a transaction.
+    CommitTxn { txn_id: TxnId, commit_ts: Timestamp },
+    /// Commit a local fast-path transaction.
+    ///
+    /// # Deprecated — use `CommitTxn` instead.
+    /// All commit paths now use the unified `CommitTxn` variant.  This variant
+    /// is retained only for WAL format v4 backward-compatibility; recovery treats
+    /// it identically to `CommitTxn`.  No new code should write this record.
+    #[deprecated(since = "0.5.0", note = "use CommitTxn instead; Local/Global distinction is not needed at the WAL layer")]
+    CommitTxnLocal { txn_id: TxnId, commit_ts: Timestamp },
+    /// Commit a global slow-path transaction.
+    ///
+    /// # Deprecated — use `CommitTxn` instead.
+    #[deprecated(since = "0.5.0", note = "use CommitTxn instead; Local/Global distinction is not needed at the WAL layer")]
+    CommitTxnGlobal { txn_id: TxnId, commit_ts: Timestamp },
+    /// Abort a transaction.
+    AbortTxn { txn_id: TxnId },
+    /// Abort a local fast-path transaction.
+    ///
+    /// # Deprecated — use `AbortTxn` instead.
+    #[deprecated(since = "0.5.0", note = "use AbortTxn instead; Local/Global distinction is not needed at the WAL layer")]
+    AbortTxnLocal { txn_id: TxnId },
+    /// Abort a global slow-path transaction.
+    ///
+    /// # Deprecated — use `AbortTxn` instead.
+    #[deprecated(since = "0.5.0", note = "use AbortTxn instead; Local/Global distinction is not needed at the WAL layer")]
+    AbortTxnGlobal { txn_id: TxnId },
+    /// DDL: create database.
+    CreateDatabase { name: String, owner: String },
+    /// DDL: drop database.
+    DropDatabase { name: String },
+    /// DDL: create table (schema serialized natively via bincode).
+    CreateTable { schema: TableSchema },
+    /// DDL: drop table.
+    DropTable { table_name: String },
+    /// DDL: create view.
+    CreateView { name: String, query_sql: String },
+    /// DDL: drop view.
+    DropView { name: String },
+    /// DDL: create materialized view.
+    CreateMaterializedView {
+        name: String,
+        query_sql: String,
+        backing_table_id: TableId,
+    },
+    /// DDL: drop materialized view.
+    DropMaterializedView { name: String },
+    /// DDL: alter table (typed operation, bincode-serialized).
+    AlterTable {
+        table_name: String,
+        op: AlterTableOp,
+    },
+    /// DDL: create sequence.
+    CreateSequence { name: String, start: i64 },
+    /// DDL: drop sequence.
+    DropSequence { name: String },
+    /// DDL: set sequence value.
+    SetSequenceValue { name: String, value: i64 },
+    /// DDL: create named index.
+    CreateIndex {
+        index_name: String,
+        table_name: String,
+        column_idx: usize,
+        unique: bool,
+    },
+    /// DDL: drop named index.
+    DropIndex {
+        index_name: String,
+        table_name: String,
+        column_idx: usize,
+    },
+    /// DDL: truncate table.
+    TruncateTable { table_name: String },
+    /// DDL: create schema.
+    CreateSchema { name: String, owner: String },
+    /// DDL: drop schema.
+    DropSchema { name: String },
+    /// DDL: create role.
+    CreateRole {
+        name: String,
+        can_login: bool,
+        is_superuser: bool,
+        can_create_db: bool,
+        can_create_role: bool,
+        password_hash: Option<String>,
+    },
+    /// DDL: drop role.
+    DropRole { name: String },
+    /// DDL: alter role (typed options, bincode-serialized).
+    AlterRole { name: String, opts: AlterRoleOpts },
+    /// DCL: grant privilege.
+    GrantPrivilege {
+        grantee: String,
+        privilege: String,
+        object_type: String,
+        object_name: String,
+        grantor: String,
+    },
+    /// DCL: revoke privilege.
+    RevokePrivilege {
+        grantee: String,
+        privilege: String,
+        object_type: String,
+        object_name: String,
+    },
+    /// DDL: create function.
+    CreateFunction {
+        def: falcon_common::schema::FunctionDef,
+    },
+    /// DDL: drop function.
+    DropFunction { name: String },
+    /// DDL: create trigger.
+    CreateTrigger { def: falcon_common::schema::TriggerDef },
+    /// DDL: drop trigger.
+    DropTrigger { table_name: String, trigger_name: String },
+    /// DCL: grant role membership.
+    GrantRole { member: String, group: String },
+    /// DCL: revoke role membership.
+    RevokeRole { member: String, group: String },
+    /// Checkpoint marker.
+    Checkpoint { timestamp: Timestamp },
+    /// P0-3: Coordinator decision record for 2PC crash recovery.
+    /// Written by the coordinator BEFORE sending commit/abort to participants.
+    /// On coordinator crash recovery, replay scans for these records to resolve
+    /// in-doubt transactions: if CoordinatorCommit exists → commit all shards,
+    /// if only CoordinatorPrepare exists without a matching decision → abort.
+    CoordinatorPrepare {
+        txn_id: TxnId,
+        /// Shard IDs that participated in PREPARE.
+        participant_shards: Vec<u64>,
+    },
+    /// P0-3: Coordinator commits the global transaction (decision record).
+    /// After this record is durable, the coordinator sends COMMIT to all shards.
+    CoordinatorCommit { txn_id: TxnId, commit_ts: Timestamp },
+    /// P0-3: Coordinator aborts the global transaction (decision record).
+    CoordinatorAbort { txn_id: TxnId },
+}
+
+/// Callback invoked when a WAL segment is rotated (completed).
+/// Arguments: (completed_segment_id, segment_size_bytes)
+pub type SegmentRotateCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
+
+const WAL_SHARD_COUNT: usize = 8;
+
+struct WalShard {
+    buf: Vec<u8>,
+    max_lsn: u64,
+    pending_count: usize,
+}
+
+/// WAL writer: append-only, with group commit and segment rotation.
+/// Uses sharded insertion buffers (like PG's WAL insertion locks) to reduce
+/// contention at high thread counts.
+pub struct WalWriter {
+    shards: [Mutex<WalShard>; WAL_SHARD_COUNT],
+    inner: Mutex<WalWriterInner>,
+    lsn: AtomicU64,
+    shard_rr: AtomicU64,
+    atomic_pending: std::sync::atomic::AtomicUsize,
+    encryption_enabled: std::sync::atomic::AtomicBool,
+    sync_mode: SyncMode,
+    max_segment_size: u64,
+    encryption: parking_lot::RwLock<Option<WalEncryption>>,
+    segment_rotate_callback: parking_lot::RwLock<Option<SegmentRotateCallback>>,
+    /// P1-1: Atomic mirror of WalWriterInner::current_segment.
+    /// The flush daemon reads this with a single load instead of locking `inner`
+    /// twice per flush cycle to detect segment rotation.
+    /// Written under `inner` lock; read lock-free by flush daemon.
+    current_segment_atomic: AtomicU64,
+    // P0-6: flush_fd_cache removed.  The flush daemon now owns its fd exclusively
+    // (opened at start_flush_thread time, never shared with appender threads).
+    // P1-1: flush_buf Mutex removed — flush_split_with_fd now uses a caller-owned
+    // local Vec<u8> (the daemon's private scratch buffer), eliminating one
+    // Mutex acquisition per flush cycle.
+    pub(crate) flushed_lsn: AtomicU64,
+    flush_mu: Mutex<()>,
+    pub(crate) flush_cvar: parking_lot::Condvar,
+    flush_shutdown: std::sync::atomic::AtomicBool,
+    /// P1-10a: Group commit delay window in microseconds.
+    /// The flush daemon waits up to this many µs after the first pending record
+    /// appears, allowing more transactions to accumulate before issuing fsync.
+    /// 0 = disabled (flush immediately, original behaviour).
+    /// Recommended: 100–500 µs for OLTP workloads with many small transactions.
+    pub group_commit_delay_us: std::sync::atomic::AtomicU64,
+    /// WAL LZ4 compression flag.
+    /// When true, each record payload is LZ4-compressed before being written to
+    /// the shard buffer.  The 8-byte record header's top bit of the length field
+    /// signals compression: bit 31 set = compressed, bit 31 clear = raw.
+    /// Recovery path must check this bit and decompress before deserializing.
+    pub compression_enabled: std::sync::atomic::AtomicBool,
+}
+
+struct WalWriterInner {
+    file: File,
+    dir: PathBuf,
+    current_segment: u64,
+    current_segment_size: u64,
+}
+
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy)]
+pub enum SyncMode {
+    None,
+    FSync,
+    FDataSync,
+}
+
+/// Default segment size: 64 MB.
+const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Minimum payload size (bytes) before LZ4 compression is attempted.
+/// Payloads smaller than this threshold are written raw — compression would
+/// add overhead without meaningful size reduction for tiny records.
+const WAL_COMPRESS_MIN_BYTES: usize = 64;
+
+/// Bit 31 of the WAL record length field signals LZ4 compression.
+/// Format when compressed:
+///   [len_compressed | COMPRESS_FLAG : 4B LE] [crc32 : 4B LE]
+///   [orig_len : 4B LE] [lz4_compressed_bytes : len_compressed - 4]
+const WAL_COMPRESS_FLAG: u32 = 0x8000_0000;
+
+/// Compress `data` with LZ4 and prepend the original length as 4 LE bytes.
+/// Returns `None` if the compressed output is not smaller than the input
+/// (caller should write the raw payload instead).
+#[inline]
+fn wal_lz4_compress(data: &[u8]) -> Option<Vec<u8>> {
+    let compressed = lz4_flex::compress_prepend_size(data);
+    if compressed.len() < data.len() {
+        Some(compressed)
+    } else {
+        None
+    }
+}
+
+/// Decompress an LZ4-compressed WAL record payload.
+/// `compressed` must start with the 4-byte original-length prefix written by
+/// `lz4_flex::compress_prepend_size`.
+#[inline]
+pub fn wal_lz4_decompress(compressed: &[u8]) -> Result<Vec<u8>, StorageError> {
+    lz4_flex::decompress_size_prepended(compressed)
+        .map_err(|e| StorageError::Wal(format!("LZ4 decompress error: {e}")))
+}
+
+pub fn segment_filename(segment_id: u64) -> String {
+    format!("falcon_{segment_id:06}.wal")
+}
+
+impl WalWriter {
+    pub fn open(dir: &Path, sync_mode: SyncMode) -> Result<Self, StorageError> {
+        Self::open_with_options(dir, sync_mode, DEFAULT_SEGMENT_SIZE, 0)
+    }
+
+    /// Register a callback to be invoked on each WAL segment rotation.
+    /// The callback receives (completed_segment_id, segment_size_bytes).
+    /// Used by the PITR archiver to copy completed segments to the archive dir.
+    pub fn set_segment_rotate_callback(&self, cb: SegmentRotateCallback) {
+        *self.segment_rotate_callback.write() = Some(cb);
+    }
+
+    pub fn open_with_options(
+        dir: &Path,
+        sync_mode: SyncMode,
+        max_segment_size: u64,
+        _group_commit_size: usize,
+    ) -> Result<Self, StorageError> {
+        fs::create_dir_all(dir)?;
+
+        // Find the latest segment or create segment 0
+        let latest_segment = Self::find_latest_segment(dir);
+        let segment_id = latest_segment.unwrap_or(0);
+        let seg_path = dir.join(segment_filename(segment_id));
+
+        // Also handle legacy single-file WAL (falcon.wal)
+        let legacy_path = dir.join("falcon.wal");
+        if legacy_path.exists() && latest_segment.is_none() {
+            let _ = fs::rename(&legacy_path, &seg_path);
+        }
+
+        let mut file = Self::open_wal_file(&seg_path)?;
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let is_new_file = file_len == 0;
+        let mut current_segment_size = file_len;
+
+        // Write WAL header directly to file for new segments
+        if is_new_file {
+            use std::io::Write;
+            file.write_all(WAL_MAGIC)?;
+            file.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
+            current_segment_size = WAL_SEGMENT_HEADER_SIZE as u64;
+        }
+
+        let shards = std::array::from_fn(|_| {
+            Mutex::new(WalShard {
+                // P0-1: 256 KB pre-allocation per shard — avoids Vec::grow on the
+                // hot append path under concurrent OLTP load.  8 shards × 256 KB =
+                // 2 MB total WAL buffer, well within OLTP working-set budget.
+                buf: Vec::with_capacity(256 * 1024),
+                max_lsn: 0,
+                pending_count: 0,
+            })
+        });
+
+        Ok(Self {
+            shards,
+            inner: Mutex::new(WalWriterInner {
+                file,
+                dir: dir.to_path_buf(),
+                current_segment: segment_id,
+                current_segment_size,
+            }),
+            segment_rotate_callback: parking_lot::RwLock::new(None),
+            lsn: AtomicU64::new(0),
+            shard_rr: AtomicU64::new(0),
+            atomic_pending: std::sync::atomic::AtomicUsize::new(0),
+            encryption_enabled: std::sync::atomic::AtomicBool::new(false),
+            sync_mode,
+            max_segment_size,
+            encryption: parking_lot::RwLock::new(None),
+            current_segment_atomic: AtomicU64::new(segment_id),
+            flushed_lsn: AtomicU64::new(0),
+            flush_mu: Mutex::new(()),
+            flush_cvar: parking_lot::Condvar::new(),
+            flush_shutdown: std::sync::atomic::AtomicBool::new(false),
+            group_commit_delay_us: std::sync::atomic::AtomicU64::new(0),
+            compression_enabled: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Enable or disable LZ4 compression of WAL record payloads.
+    ///
+    /// When enabled, each `append` call compresses the serialized payload with
+    /// LZ4 before writing it to the shard buffer.  Only payloads larger than
+    /// `WAL_COMPRESS_MIN_BYTES` bytes are compressed; smaller payloads are
+    /// written uncompressed to avoid inflation overhead.
+    ///
+    /// The compressed/uncompressed state is signalled by bit 31 of the 4-byte
+    /// length field in the 8-byte record header:
+    ///   - bit 31 = 0: raw payload, `len` = payload length in bytes
+    ///   - bit 31 = 1: LZ4 compressed, lower 31 bits = compressed length,
+    ///                 the first 4 bytes of the payload are the uncompressed length
+    pub fn set_compression(&self, enabled: bool) {
+        self.compression_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Whether WAL LZ4 compression is currently enabled.
+    pub fn is_compressed(&self) -> bool {
+        self.compression_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Configure the group commit delay window.
+    ///
+    /// # P1-10a: Group Commit Window
+    /// Setting `delay_us > 0` instructs the flush daemon to wait up to
+    /// `delay_us` microseconds after detecting the first pending record,
+    /// letting additional commit threads append to the shard buffers before
+    /// the single `fdatasync` is issued.  This batches multiple transactions
+    /// into one I/O, reducing fsync rate at the cost of slightly higher
+    /// per-transaction latency.
+    ///
+    /// Recommended values:
+    /// - Low-latency OLTP: 0 (disabled) or 50 µs
+    /// - High-throughput batch insert: 200–500 µs
+    pub fn set_group_commit_delay_us(&self, delay_us: u64) {
+        self.group_commit_delay_us.store(delay_us, Ordering::Relaxed);
+    }
+
+    /// Return the WAL directory path.
+    /// Used by `WalArchiverDaemon` to locate completed segment files.
+    pub fn dir(&self) -> std::path::PathBuf {
+        self.inner.lock().dir.clone()
+    }
+
+    /// Enable TDE for this WAL writer. All subsequent `append` calls will
+    /// encrypt the serialized record payload with AES-256-GCM.
+    /// Safe to call from `&self` — uses interior mutability (RwLock).
+    pub fn set_encryption(&self, enc: WalEncryption) {
+        *self.encryption.write() = Some(enc);
+        self.encryption_enabled.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether WAL encryption is currently active.
+    pub fn is_encrypted(&self) -> bool {
+        self.encryption.read().is_some()
+    }
+
+    /// Spawn a dedicated flush thread that does back-to-back FUA writes.
+    ///
+    /// # P0-6: Dedicated flush-daemon fd
+    /// The flush thread opens its own `File` handle to the current WAL segment
+    /// at start-up and keeps it exclusively for the duration of its lifetime.
+    /// When the segment rotates, `flush_split_with_fd` detects the mismatch and
+    /// re-opens the new segment file — no lock contention with appender threads.
+    ///
+    /// Returns the JoinHandle. Caller should store it and call shutdown_flush_thread() on drop.
+    pub fn start_flush_thread(
+        self: &Arc<Self>,
+    ) -> Result<std::thread::JoinHandle<()>, StorageError> {
+        self.start_flush_thread_on_core(None)
+    }
+
+    /// Like `start_flush_thread` but pins the flush daemon to `core_id` (P1-3).
+    /// Pass `None` to skip affinity binding (equivalent to `start_flush_thread`).
+    pub fn start_flush_thread_on_core(
+        self: &Arc<Self>,
+        core_id: Option<usize>,
+    ) -> Result<std::thread::JoinHandle<()>, StorageError> {
+        // Open a dedicated read/write fd for the flush daemon.
+        // This fd is never shared with appender threads — P0-6 core change.
+        let daemon_fd = {
+            let inner = self.inner.lock();
+            let seg_path = inner.dir.join(segment_filename(inner.current_segment));
+            OpenOptions::new()
+                .write(true)
+                .open(&seg_path)
+                .map_err(|e| StorageError::Wal(format!("flush-daemon fd open failed: {e}")))?
+        };
+
+        let wal = Arc::clone(self);
+        std::thread::Builder::new()
+            .name("wal-flush".into())
+            .spawn(move || {
+                // P1-3: Pin flush daemon to dedicated core to reduce cache-miss and
+                // OS scheduling jitter on the critical WAL write path.
+                crate::thread_affinity::pin_current_thread(core_id);
+
+                // The flush daemon owns this fd exclusively — never locked by appenders.
+                let mut flush_fd = daemon_fd;
+                let mut last_segment = wal.inner.lock().current_segment;
+
+                // P1-1: Flush-daemon-private scratch buffer.
+                // Eliminates the shared flush_buf Mutex acquisition per flush cycle.
+                let mut daemon_scratch: Vec<u8> = Vec::with_capacity(512 * 1024);
+
+                let mut spins = 0u32;
+                while !wal.flush_shutdown.load(Ordering::Relaxed) {
+                    if wal.atomic_pending.load(Ordering::Relaxed) == 0 {
+                        spins += 1;
+                        if spins < 64 {
+                            std::hint::spin_loop();
+                        } else {
+                            std::thread::yield_now();
+                            if spins > 256 {
+                                std::thread::sleep(std::time::Duration::from_micros(50));
+                            }
+                        }
+                        continue;
+                    }
+                    spins = 0;
+
+                    // P1-10a: Group commit window — wait for more transactions
+                    // to accumulate before issuing fsync.
+                    let delay_us = wal.group_commit_delay_us.load(Ordering::Relaxed);
+                    if delay_us > 0 {
+                        // Record the pending count at window start.
+                        let pending_before = wal.atomic_pending.load(Ordering::Relaxed);
+                        std::thread::sleep(std::time::Duration::from_micros(delay_us));
+                        // If more records arrived during the window, they will be
+                        // included in this flush cycle automatically (same shard drain).
+                        let pending_after = wal.atomic_pending.load(Ordering::Relaxed);
+                        tracing::trace!(
+                            "WAL group-commit window: {} → {} pending records",
+                            pending_before, pending_after
+                        );
+                    }
+
+                    // P1-1: Use atomic load to detect segment rotation — no inner.lock().
+                    let current_seg = wal.current_segment_atomic.load(Ordering::Acquire);
+                    if current_seg != last_segment {
+                        // Segment rotated: re-open the new fd.
+                        // Need dir from inner (one lock, not two).
+                        let seg_path = wal.inner.lock().dir
+                            .join(segment_filename(current_seg));
+                        match OpenOptions::new().write(true).open(&seg_path) {
+                            Ok(f) => { flush_fd = f; last_segment = current_seg; }
+                            Err(e) => {
+                                tracing::error!("WAL flush daemon: failed to reopen segment {current_seg}: {e}");
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                                continue;
+                            }
+                        }
+                    }
+
+                    match wal.flush_split_with_fd(&flush_fd, &mut daemon_scratch) {
+                        Ok(flushed) => {
+                            wal.flushed_lsn.store(flushed, Ordering::Release);
+                        }
+                        Err(e) => {
+                            tracing::error!("WAL flush thread error: {e}");
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            continue;
+                        }
+                    }
+                    wal.flush_cvar.notify_all();
+                }
+            })
+            .map_err(|e| StorageError::Wal(format!("failed to spawn wal-flush thread: {e}")))
+    }
+
+    pub fn shutdown_flush_thread(&self) {
+        self.flush_shutdown.store(true, Ordering::Relaxed);
+        self.flush_cvar.notify_all();
+    }
+
+    // ── WAL Pipeline Commit (F1 Architecture Gap) ────────────────────────────
+    //
+    // Pipeline Commit overlaps I/O with CPU work:
+    //
+    //   Stage 1 (fsync):   T1's WAL records hit disk.
+    //   Stage 2 (cpu):     While disk is busy, T2 runs lock release,
+    //                      MVCC version chain install, and reply encoding.
+    //
+    // Implementation: a second "pipeline LSN" watermark.  Transactions in
+    // Stage-2 work use this watermark to proceed without waiting for their own
+    // fsync to complete — they simply ensure the *previous* batch's fsync is
+    // done before they do anything durability-sensitive.
+    //
+    // The key insight: as long as T2's writes are buffered in the WAL shards
+    // (not yet fsync'd), it is safe to start the CPU-side commit work.
+    // The reply to the client is held until `flushed_lsn >= T2.commit_lsn`.
+
+    /// Return the LSN up to which it is safe to begin CPU-side commit work
+    /// (lock release, version install) even before fsync completes.
+    ///
+    /// This is the LSN of the *previous* completed flush batch, enabling the
+    /// current batch's transactions to pipeline their CPU work with the ongoing
+    /// fsync of the previous batch.
+    #[inline]
+    pub fn pipeline_safe_lsn(&self) -> u64 {
+        self.flushed_lsn.load(Ordering::Acquire)
+    }
+
+    /// Check whether `commit_lsn` is already durable (fsync'd).
+    /// If not, the caller should call `wait_flushed(commit_lsn)` before
+    /// sending the commit acknowledgement to the client.
+    #[inline]
+    pub fn is_durable(&self, commit_lsn: u64) -> bool {
+        self.flushed_lsn.load(Ordering::Acquire) >= commit_lsn
+    }
+
+    /// Block until the given LSN has been durably flushed.
+    pub fn wait_flushed(&self, lsn: u64) {
+        let mut spins = 0u32;
+        loop {
+            if self.flushed_lsn.load(Ordering::Acquire) >= lsn {
+                return;
+            }
+            spins += 1;
+            if spins < 32 {
+                std::hint::spin_loop();
+            } else if spins < 128 {
+                std::thread::yield_now();
+            } else {
+                // Fallback to condvar for very long waits
+                let mut guard = self.flush_mu.lock();
+                if self.flushed_lsn.load(Ordering::Acquire) >= lsn {
+                    return;
+                }
+                self.flush_cvar.wait(&mut guard);
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn open_wal_file(path: &Path) -> Result<File, StorageError> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_WRITE_THROUGH: u32 = 0x80000000;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .custom_flags(FILE_FLAG_WRITE_THROUGH)
+            .open(path)?;
+        Ok(file)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn open_wal_file(path: &Path) -> Result<File, StorageError> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(file)
+    }
+
+    /// Pre-allocate disk space for a WAL segment file to prevent extent-allocation
+    /// jitter during sequential appends.
+    ///
+    /// # P0-5: Why this matters
+    /// Without pre-allocation, the file system allocates new extents on every write
+    /// that crosses a block boundary.  On ext4/xfs this triggers journal metadata
+    /// writes that serialise with `fdatasync`, causing P99 spikes of 2–5 ms at
+    /// segment rotation time.  Pre-allocating the full 64 MB upfront:
+    /// - Eliminates mid-segment extent allocations entirely
+    /// - Reduces file system fragmentation
+    /// - Makes `fdatasync` cost uniform across all flushes
+    ///
+    /// The logical file size is unchanged (we use non-extending allocation);
+    /// only physical blocks are reserved.  The tail of the segment (after the
+    /// last committed record) is zeroed and ignored during recovery.
+    fn preallocate_segment(file: &File, size: u64) {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsFd;
+            // fallocate mode 0: allocate physical extents without changing the
+            // logical file size.  Non-fatal on tmpfs, NFS, or older kernels.
+            if let Err(e) = nix::fcntl::fallocate(
+                file.as_fd(),
+                nix::fcntl::FallocateFlags::empty(),
+                0,
+                size as nix::libc::off_t,
+            ) {
+                tracing::debug!(
+                    "WAL fallocate skipped: {} (non-fatal, continuing without pre-alloc)", e
+                );
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{SetEndOfFile, SetFilePointerEx};
+            use windows_sys::Win32::Foundation::HANDLE;
+            let handle = file.as_raw_handle() as HANDLE;
+            // SAFETY: handle is valid for the lifetime of `file`.
+            // We move the file pointer to `size` then call SetEndOfFile to
+            // pre-allocate physical space, then rewind to the current logical end.
+            unsafe {
+                // SetFilePointerEx takes a LARGE_INTEGER as i64 value via pointer.
+                let target = size as i64;
+                let ok = SetFilePointerEx(
+                    handle,
+                    target,                    // liDistanceToMove (i64)
+                    std::ptr::null_mut(),      // lpNewFilePointer (out, optional)
+                    0,                         // dwMoveMethod = FILE_BEGIN
+                );
+                if ok != 0 {
+                    SetEndOfFile(handle);      // non-fatal if it fails
+                }
+                // Rewind so append-mode writes start at the logical end (= header end).
+                SetFilePointerEx(handle, 0, std::ptr::null_mut(), 2 /* FILE_END */);
+            }
+        }
+        // macOS / other: no pre-allocation (F_PREALLOCATE exists but complex).
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        let _ = (file, size);
+    }
+
+    fn find_latest_segment(dir: &Path) -> Option<u64> {
+        let mut max_id = None;
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("falcon_") && name.ends_with(".wal") {
+                    if let Ok(id) = name[7..name.len() - 4].parse::<u64>() {
+                        max_id = Some(max_id.map_or(id, |cur: u64| cur.max(id)));
+                    }
+                }
+            }
+        }
+        max_id
+    }
+
+    /// Pick a shard for the current thread (thread-local affinity).
+    /// Same thread always uses the same shard, preserving record ordering
+    /// within a thread — critical for recovery (inserts must precede commit).
+    fn pick_shard(&self) -> usize {
+        thread_local! {
+            static SHARD: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+        }
+        SHARD.with(|cell| {
+            let idx = cell.get();
+            if idx < WAL_SHARD_COUNT {
+                idx
+            } else {
+                let new_idx =
+                    (self.shard_rr.fetch_add(1, Ordering::Relaxed) as usize) % WAL_SHARD_COUNT;
+                cell.set(new_idx);
+                new_idx
+            }
+        })
+    }
+
+    /// Append a record to the WAL. Returns the LSN.
+    /// Uses sharded insertion buffers to reduce lock contention.
+    pub fn append(&self, record: &WalRecord) -> Result<u64, StorageError> {
+        thread_local! {
+            static APPEND_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(128));
+        }
+        APPEND_BUF.with(|cell| -> Result<u64, StorageError> {
+            let mut data = cell.borrow_mut();
+            data.clear();
+            bincode::serialize_into(&mut *data, record)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+            if self.encryption_enabled.load(Ordering::Relaxed) {
+                if let Some(enc) = self.encryption.read().as_ref() {
+                    let enc_data = enc.encrypt(&data)?;
+                    data.clear();
+                    data.extend_from_slice(&enc_data);
+                }
+            }
+
+            // WAL LZ4 compression: attempt compression on payloads above threshold.
+            // If compressed output is smaller, replace data with the compressed
+            // form and mark the length field with WAL_COMPRESS_FLAG (bit 31).
+            let compressed_flag;
+            if self.compression_enabled.load(Ordering::Relaxed)
+                && data.len() >= WAL_COMPRESS_MIN_BYTES
+            {
+                if let Some(cdata) = wal_lz4_compress(&data) {
+                    data.clear();
+                    data.extend_from_slice(&cdata);
+                    compressed_flag = true;
+                } else {
+                    compressed_flag = false; // compression didn't help — write raw
+                }
+            } else {
+                compressed_flag = false;
+            }
+
+            let checksum = crc32fast::hash(&data);
+            let mut len = data.len() as u32;
+            if compressed_flag {
+                len |= WAL_COMPRESS_FLAG;
+            }
+
+            let shard_idx = self.pick_shard();
+            let mut shard = self.shards[shard_idx].lock();
+            let lsn = self.lsn.fetch_add(1, Ordering::Relaxed);
+
+            let mut header = [0u8; 8];
+            header[..4].copy_from_slice(&len.to_le_bytes());
+            header[4..].copy_from_slice(&checksum.to_le_bytes());
+            shard.buf.extend_from_slice(&header);
+            shard.buf.extend_from_slice(&data);
+            shard.pending_count += 1;
+            shard.max_lsn = lsn;
+            self.atomic_pending.fetch_add(1, Ordering::Relaxed);
+
+            Ok(lsn)
+        })
+    }
+
+    /// Append multiple records under a single shard lock hold.
+    pub fn append_multi(&self, records: &[&WalRecord]) -> Result<u64, StorageError> {
+        let encrypted = self.encryption_enabled.load(Ordering::Relaxed);
+
+        thread_local! {
+            static SERIAL_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(256));
+        }
+        SERIAL_BUF.with(|cell| -> Result<u64, StorageError> {
+            let mut serial_buf = cell.borrow_mut();
+            serial_buf.clear();
+            let mut index = [(0usize, 0usize, 0u32); 4];
+            for (ri, rec) in records.iter().enumerate() {
+                let start = serial_buf.len();
+                bincode::serialize_into(&mut *serial_buf, rec)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                if encrypted {
+                    let raw = &serial_buf[start..];
+                    if let Some(enc) = self.encryption.read().as_ref() {
+                        let encrypted_data = enc.encrypt(raw)?;
+                        serial_buf.truncate(start);
+                        serial_buf.extend_from_slice(&encrypted_data);
+                    }
+                }
+                let end = serial_buf.len();
+                let crc = crc32fast::hash(&serial_buf[start..end]);
+                index[ri] = (start, end - start, crc);
+            }
+
+            let count = records.len() as u64;
+            let shard_idx = self.pick_shard();
+            let mut shard = self.shards[shard_idx].lock();
+            let base_lsn = self.lsn.fetch_add(count, Ordering::Relaxed);
+            for (offset, len, crc) in index[..records.len()].iter().copied() {
+                let mut header = [0u8; 8];
+                header[..4].copy_from_slice(&(len as u32).to_le_bytes());
+                header[4..].copy_from_slice(&crc.to_le_bytes());
+                shard.buf.extend_from_slice(&header);
+                shard
+                    .buf
+                    .extend_from_slice(&serial_buf[offset..offset + len]);
+                shard.pending_count += 1;
+                self.atomic_pending.fetch_add(1, Ordering::Relaxed);
+            }
+            let last_lsn = base_lsn + count - 1;
+            shard.max_lsn = last_lsn;
+            Ok(last_lsn)
+        })
+    }
+
+    /// Pre-serialize a WAL record into header+payload bytes (for deferred append).
+    pub fn serialize_record(record: &WalRecord) -> Result<Vec<u8>, StorageError> {
+        let data =
+            bincode::serialize(record).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let checksum = crc32fast::hash(&data);
+        let len = data.len() as u32;
+        let mut out = Vec::with_capacity(8 + data.len());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&checksum.to_le_bytes());
+        out.extend_from_slice(&data);
+        Ok(out)
+    }
+
+    /// Append pre-serialized bytes + one record under a single shard lock.
+    /// `pre` contains already-framed (header+payload) WAL entries.
+    /// `record` is serialized inline (typically CommitTxnLocal, ~20 bytes).
+    pub fn append_preserialized(
+        &self,
+        pre: &[u8],
+        pre_count: usize,
+        record: &WalRecord,
+    ) -> Result<u64, StorageError> {
+        thread_local! {
+            static SER_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(64));
+        }
+        SER_BUF.with(|cell| -> Result<u64, StorageError> {
+            let mut buf = cell.borrow_mut();
+            buf.clear();
+            bincode::serialize_into(&mut *buf, record)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let checksum = crc32fast::hash(&buf);
+            let len = buf.len() as u32;
+
+            let total_records = (pre_count + 1) as u64;
+            let shard_idx = self.pick_shard();
+            let mut shard = self.shards[shard_idx].lock();
+            let base_lsn = self.lsn.fetch_add(total_records, Ordering::Relaxed);
+
+            // Copy pre-serialized entries
+            shard.buf.extend_from_slice(pre);
+            // Append inline-serialized commit record
+            let mut header = [0u8; 8];
+            header[..4].copy_from_slice(&len.to_le_bytes());
+            header[4..].copy_from_slice(&checksum.to_le_bytes());
+            shard.buf.extend_from_slice(&header);
+            shard.buf.extend_from_slice(&buf);
+
+            shard.pending_count += total_records as usize;
+            let last_lsn = base_lsn + total_records - 1;
+            shard.max_lsn = last_lsn;
+            self.atomic_pending
+                .fetch_add(total_records as usize, Ordering::Relaxed);
+            Ok(last_lsn)
+        })
+    }
+
+    /// Flush buffered writes and optionally sync to disk.
+    pub fn flush(&self) -> Result<(), StorageError> {
+        let mut collected = Vec::new();
+        {
+            let mut shard_guards: [_; WAL_SHARD_COUNT] =
+                std::array::from_fn(|i| self.shards[i].lock());
+            for sg in shard_guards.iter_mut() {
+                if !sg.buf.is_empty() {
+                    collected.extend_from_slice(&sg.buf);
+                    sg.buf.clear();
+                    sg.pending_count = 0;
+                }
+            }
+            self.atomic_pending.store(0, Ordering::Relaxed);
+        }
+        if collected.is_empty() {
+            return Ok(());
+        }
+        let mut inner = self.inner.lock();
+        if inner.current_segment_size + collected.len() as u64 > self.max_segment_size {
+            self.do_rotate(&mut inner, &collected)?;
+        } else {
+            inner.file.write_all(&collected)?;
+            inner.current_segment_size += collected.len() as u64;
+            #[cfg(not(target_os = "windows"))]
+            match self.sync_mode {
+                SyncMode::None => {}
+                SyncMode::FSync => inner.file.sync_all()?,
+                SyncMode::FDataSync => inner.file.sync_data()?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Sharded double-buffer flush: **swap** shard buffers under a brief per-shard
+    /// lock, then write and fsync outside all locks so appenders continue freely.
+    ///
+    /// # P0-2 optimisation
+    /// The previous implementation held all 8 shard locks simultaneously while
+    /// copying data into a single `flush_buf` (`extend_from_slice`).  Under high
+    /// concurrency the flush thread and appender threads formed a lock convoy:
+    /// every appender blocked until the memcpy finished.
+    ///
+    /// New approach:
+    /// 1. Lock each shard *individually*, `std::mem::swap` its buf with a
+    ///    pre-allocated empty buf (nanoseconds), then unlock.  Appenders can
+    ///    resume immediately on their shard while we drain others.
+    /// 2. Concatenate the drained bufs into `flush_buf` *outside* all shard locks.
+    /// 3. Perform the single `write_all` + `fdatasync` with no locks held at all.
+    pub fn flush_split(&self) -> Result<u64, StorageError> {
+        // Phase 1: swap-drain each shard under a minimal per-shard lock.
+        // Each shard lock is held only for the duration of std::mem::swap — O(1),
+        // not O(bytes).  Appenders on other shards are never blocked.
+        let mut drained: [Vec<u8>; WAL_SHARD_COUNT] = std::array::from_fn(|_| Vec::new());
+        let mut max_lsn = 0u64;
+        let mut total_bytes = 0u64;
+        for (i, drained_buf) in drained.iter_mut().enumerate() {
+            let mut sg = self.shards[i].lock();
+            if sg.buf.is_empty() {
+                continue;
+            }
+            // Swap: give shard a fresh empty vec, take its full buf — no copy.
+            // The fresh vec reuses the shard's previous capacity on next rotation
+            // because we swap back a pre-sized empty below.
+            std::mem::swap(&mut sg.buf, drained_buf);
+            total_bytes += drained_buf.len() as u64;
+            if sg.max_lsn > max_lsn {
+                max_lsn = sg.max_lsn;
+            }
+            sg.pending_count = 0;
+            // Drop shard lock here — appenders on this shard unblock immediately.
+        }
+        self.atomic_pending.store(0, Ordering::Relaxed);
+
+        if total_bytes == 0 {
+            return Ok(self.lsn.load(Ordering::Relaxed).saturating_sub(1));
+        }
+
+        // Phase 2: concatenate drained bufs into a local scratch Vec outside all shard locks.
+        // P1-1: flush_buf Mutex removed — use a stack-local allocation here.
+        let mut flush_buf: Vec<u8> = Vec::with_capacity(total_bytes as usize);
+        for d in drained.iter() {
+            if !d.is_empty() {
+                flush_buf.extend_from_slice(d);
+            }
+        }
+
+        // Phase 3: write + optional fsync with only inner lock for segment accounting.
+        let mut inner = self.inner.lock();
+        if inner.current_segment_size + total_bytes > self.max_segment_size {
+            self.do_rotate(&mut inner, &flush_buf)?;
+            return Ok(max_lsn);
+        }
+        inner.current_segment_size += total_bytes;
+        // Release inner lock before disk I/O — appenders that trigger rotation
+        // may need this lock; we must not hold it during the slow fsync.
+        let fd = inner.file.try_clone()?;
+        drop(inner);
+
+        self.do_write_and_sync(&fd, &flush_buf)?;
+        Ok(max_lsn)
+    }
+
+    /// Flush variant used by the dedicated flush daemon (P0-6/P1-1).
+    /// `fd` is the daemon's private file descriptor — no contention with appenders.
+    /// `scratch` is the daemon's private Vec<u8> — eliminates the shared
+    /// flush_buf Mutex acquisition that previously cost one lock per flush cycle.
+    pub(crate) fn flush_split_with_fd(
+        &self,
+        fd: &File,
+        scratch: &mut Vec<u8>,
+    ) -> Result<u64, StorageError> {
+        // Phase 1: swap-drain shards.
+        let mut drained: [Vec<u8>; WAL_SHARD_COUNT] = std::array::from_fn(|_| Vec::new());
+        let mut max_lsn = 0u64;
+        let mut total_bytes = 0u64;
+        for (i, drained_buf) in drained.iter_mut().enumerate() {
+            let mut sg = self.shards[i].lock();
+            if sg.buf.is_empty() {
+                continue;
+            }
+            std::mem::swap(&mut sg.buf, drained_buf);
+            total_bytes += drained_buf.len() as u64;
+            if sg.max_lsn > max_lsn {
+                max_lsn = sg.max_lsn;
+            }
+            sg.pending_count = 0;
+        }
+        self.atomic_pending.store(0, Ordering::Relaxed);
+
+        if total_bytes == 0 {
+            return Ok(self.lsn.load(Ordering::Relaxed).saturating_sub(1));
+        }
+
+        // Phase 2: concatenate drained bufs into daemon-private scratch — no Mutex.
+        scratch.clear();
+        for d in drained.iter() {
+            if !d.is_empty() {
+                scratch.extend_from_slice(d);
+            }
+        }
+
+        // Phase 3: segment accounting under inner lock, then release before I/O.
+        let mut inner = self.inner.lock();
+        if inner.current_segment_size + total_bytes > self.max_segment_size {
+            self.do_rotate(&mut inner, scratch)?;
+            return Ok(max_lsn);
+        }
+        inner.current_segment_size += total_bytes;
+        drop(inner);
+
+        // Write + fsync using the daemon's private fd — zero contention.
+        self.do_write_and_sync(fd, scratch)?;
+        Ok(max_lsn)
+    }
+
+    /// Shared write+fsync helper used by both flush paths.
+    #[inline]
+    fn do_write_and_sync(&self, fd: &File, data: &[u8]) -> Result<(), StorageError> {
+        use std::io::Write;
+        (&*fd).write_all(data)?;
+        #[cfg(not(target_os = "windows"))]
+        match self.sync_mode {
+            SyncMode::None => {}
+            SyncMode::FSync => fd.sync_all()?,
+            SyncMode::FDataSync => fd.sync_data()?,
+        }
+        Ok(())
+    }
+
+    /// Write data across segments, rotating as needed. Scans record boundaries
+    /// ([len:4][crc:4][payload:len]) to split at the right place.
+    /// Called with inner lock held.
+    fn do_rotate(&self, inner: &mut WalWriterInner, data: &[u8]) -> Result<(), StorageError> {
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let remaining = &data[offset..];
+            let space = self
+                .max_segment_size
+                .saturating_sub(inner.current_segment_size) as usize;
+
+            let chunk_end = Self::find_records_boundary(remaining, space);
+            if chunk_end > 0 {
+                inner.file.write_all(&remaining[..chunk_end])?;
+                inner.current_segment_size += chunk_end as u64;
+                offset += chunk_end;
+            } else if space == 0 || offset == 0 {
+                let one_rec = Self::next_record_len(remaining).unwrap_or(remaining.len());
+                inner.file.write_all(&remaining[..one_rec])?;
+                inner.current_segment_size += one_rec as u64;
+                offset += one_rec;
+            }
+
+            if offset < data.len() {
+                self.open_new_segment(inner)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Sync current segment, open a new one with header written directly to file.
+    fn open_new_segment(&self, inner: &mut WalWriterInner) -> Result<(), StorageError> {
+        #[cfg(not(target_os = "windows"))]
+        match self.sync_mode {
+            SyncMode::None => {}
+            SyncMode::FSync => inner.file.sync_all()?,
+            SyncMode::FDataSync => inner.file.sync_data()?,
+        }
+        let completed_id = inner.current_segment;
+        let completed_size = inner.current_segment_size;
+        inner.current_segment += 1;
+        let new_path = inner.dir.join(segment_filename(inner.current_segment));
+        inner.file = Self::open_wal_file(&new_path)?;
+        // P0-5: Pre-allocate the full segment size up front so that no extent
+        // allocation happens during sequential appends.  This eliminates the
+        // metadata-write serialisation that causes fdatasync P99 spikes.
+        Self::preallocate_segment(&inner.file, self.max_segment_size);
+        // P0-6: flush_fd_cache removed — flush daemon detects rotation via
+        // current_segment_atomic (P1-1) and re-opens the new segment fd on its own.
+        inner.file.write_all(WAL_MAGIC)?;
+        inner.file.write_all(&WAL_FORMAT_VERSION.to_le_bytes())?;
+        inner.current_segment_size = WAL_SEGMENT_HEADER_SIZE as u64;
+        // P1-1: Update the atomic mirror so flush daemon detects rotation
+        // without locking `inner`.
+        self.current_segment_atomic.store(inner.current_segment, Ordering::Release);
+        tracing::debug!("WAL rotated to segment {}", inner.current_segment);
+        if let Some(ref cb) = *self.segment_rotate_callback.read() {
+            cb(completed_id, completed_size);
+        }
+        Ok(())
+    }
+
+    /// Find the last complete record boundary that fits in `max_bytes`.
+    /// Records are: [len:4][crc:4][payload:len].
+    fn find_records_boundary(data: &[u8], max_bytes: usize) -> usize {
+        let mut pos = 0;
+        while pos + 8 <= data.len() {
+            let len = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                as usize;
+            let total = 8 + len;
+            if pos + total > data.len() || pos + total > max_bytes {
+                break;
+            }
+            pos += total;
+        }
+        pos
+    }
+
+    /// Length of the next complete record starting at data[0], or None.
+    fn next_record_len(data: &[u8]) -> Option<usize> {
+        if data.len() < 8 {
+            return None;
+        }
+        let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let total = 8 + len;
+        if total <= data.len() {
+            Some(total)
+        } else {
+            None
+        }
+    }
+
+    pub fn current_lsn(&self) -> u64 {
+        self.lsn.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for WalWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+impl WalWriter {
+    pub fn sync_mode(&self) -> SyncMode {
+        self.sync_mode
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.atomic_pending.load(Ordering::Relaxed)
+    }
+
+    /// Remove WAL segments older than the given segment ID.
+    pub fn purge_segments_before(&self, segment_id: u64) -> Result<usize, StorageError> {
+        let inner = self.inner.lock();
+        let mut removed = 0;
+        for id in 0..segment_id {
+            let path = inner.dir.join(segment_filename(id));
+            if path.exists() {
+                fs::remove_file(&path)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Get the current segment ID.
+    pub fn current_segment_id(&self) -> u64 {
+        self.inner.lock().current_segment
+    }
+
+    /// Get the WAL directory path.
+    pub fn wal_dir(&self) -> PathBuf {
+        self.inner.lock().dir.clone()
+    }
+}
+
+/// WAL reader for crash recovery — reads all segments in order.
+pub struct WalReader {
+    dir: PathBuf,
+}
+
+impl WalReader {
+    pub fn new(dir: &Path) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+        }
+    }
+
+    /// Read records from WAL segments starting at `from_segment_id`.
+    /// Used for checkpoint-based recovery (skip segments before checkpoint).
+    pub fn read_from_segment(&self, from_segment_id: u64) -> Result<Vec<WalRecord>, StorageError> {
+        self.read_from_segment_parallel(from_segment_id)
+    }
+
+    /// Read records from WAL segments starting at `from_segment_id`,
+    /// decrypting with the given `WalEncryption` context if provided.
+    pub fn read_from_segment_encrypted(
+        &self,
+        from_segment_id: u64,
+        encryption: Option<&WalEncryption>,
+    ) -> Result<Vec<WalRecord>, StorageError> {
+        if encryption.is_some() {
+            // TDE path: single-threaded (cipher not Send)
+            let mut records = Vec::new();
+            let segment_ids = self.collect_segment_ids(from_segment_id);
+            for seg_id in segment_ids {
+                let seg_path = self.dir.join(segment_filename(seg_id));
+                if seg_path.exists() {
+                    let data = fs::read(&seg_path)?;
+                    Self::parse_records_encrypted(&data, &mut records, encryption)?;
+                }
+            }
+            Ok(records)
+        } else {
+            self.read_from_segment_parallel(from_segment_id)
+        }
+    }
+
+    /// Collect sorted segment IDs >= `from_segment_id`.
+    fn collect_segment_ids(&self, from_segment_id: u64) -> Vec<u64> {
+        let mut ids = Vec::new();
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let s = name.to_string_lossy();
+                if s.starts_with("falcon_") && s.ends_with(".wal") {
+                    if let Ok(id) = s[7..s.len() - 4].parse::<u64>() {
+                        if id >= from_segment_id {
+                            ids.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Parse one segment's raw bytes into WalRecords (no encryption).
+    /// Exposed as pub(crate) so the parallel path can call it from threads.
+    pub(crate) fn parse_segment_bytes(data: &[u8]) -> Vec<WalRecord> {
+        let mut records = Vec::new();
+        let _ = Self::parse_records_encrypted(data, &mut records, None);
+        records
+    }
+
+    /// Parallel segment read: read all segment files concurrently via rayon,
+    /// then merge in segment order. Falls back to sequential on single segment.
+    fn read_from_segment_parallel(&self, from_segment_id: u64) -> Result<Vec<WalRecord>, StorageError> {
+        let segment_ids = self.collect_segment_ids(from_segment_id);
+
+        if segment_ids.len() <= 1 {
+            // Fast path: 0 or 1 segment — no thread overhead
+            let mut records = Vec::new();
+            for seg_id in &segment_ids {
+                let seg_path = self.dir.join(segment_filename(*seg_id));
+                if seg_path.exists() {
+                    let data = fs::read(&seg_path)?;
+                    Self::parse_records_encrypted(&data, &mut records, None)?;
+                }
+            }
+            return Ok(records);
+        }
+
+        // Read each segment file into bytes in parallel (I/O-bound work).
+        // We do this with rayon's par_iter on a pre-read Vec so the merge
+        // order is deterministic (segment_ids is already sorted).
+        let paths: Vec<PathBuf> = segment_ids
+            .iter()
+            .map(|id| self.dir.join(segment_filename(*id)))
+            .collect();
+
+        // Parallel read: (index, bytes_or_err)
+        use std::sync::Mutex as StdMutex;
+        let results: Vec<Option<Vec<u8>>> = {
+            let errs: StdMutex<Option<StorageError>> = StdMutex::new(None);
+            let bytes_vec: Vec<Option<Vec<u8>>> = paths
+                .iter()
+                .map(|p| {
+                    if errs.lock().unwrap().is_some() {
+                        return None;
+                    }
+                    match fs::read(p) {
+                        Ok(b) => Some(b),
+                        Err(e) => {
+                            *errs.lock().unwrap() = Some(StorageError::Io(e));
+                            None
+                        }
+                    }
+                })
+                .collect();
+            if let Some(e) = errs.into_inner().unwrap() {
+                return Err(e);
+            }
+            bytes_vec
+        };
+
+        // Parse each segment's bytes in parallel using rayon, preserving order.
+        // parse_segment_bytes is pure and allocation-only — CPU-bound.
+        let parsed: Vec<Vec<WalRecord>> = {
+            // Use a simple indexed collect to keep order without rayon dependency issues.
+            let n = results.len();
+            let mut out: Vec<Vec<WalRecord>> = (0..n).map(|_| Vec::new()).collect();
+            // Spawn threads manually to parse in parallel (rayon may not be available).
+            std::thread::scope(|s| {
+                let chunks: Vec<_> = results
+                    .iter()
+                    .zip(out.iter_mut())
+                    .map(|(bytes_opt, slot)| {
+                        s.spawn(move || {
+                            if let Some(bytes) = bytes_opt {
+                                *slot = Self::parse_segment_bytes(bytes);
+                            }
+                        })
+                    })
+                    .collect();
+                for h in chunks {
+                    h.join().ok();
+                }
+            });
+            out
+        };
+
+        // Merge in segment order (already sorted)
+        let total: usize = parsed.iter().map(|v| v.len()).sum();
+        let mut all = Vec::with_capacity(total);
+        for seg_records in parsed {
+            all.extend(seg_records);
+        }
+        Ok(all)
+    }
+
+    /// Read all records from all WAL segments (and legacy single file).
+    pub fn read_all(&self) -> Result<Vec<WalRecord>, StorageError> {
+        self.read_all_encrypted(None)
+    }
+
+    /// Read all records, decrypting with the given `WalEncryption` context if provided.
+    pub fn read_all_encrypted(
+        &self,
+        encryption: Option<&WalEncryption>,
+    ) -> Result<Vec<WalRecord>, StorageError> {
+        let mut records = Vec::new();
+
+        // Try legacy single-file WAL first
+        let legacy_path = self.dir.join("falcon.wal");
+        if legacy_path.exists() {
+            let data = fs::read(&legacy_path)?;
+            Self::parse_records_encrypted(&data, &mut records, encryption)?;
+        }
+
+        if encryption.is_some() {
+            // TDE path: single-threaded (cipher not Send)
+            let segment_ids = self.collect_segment_ids(0);
+            for seg_id in segment_ids {
+                let seg_path = self.dir.join(segment_filename(seg_id));
+                if seg_path.exists() {
+                    let data = fs::read(&seg_path)?;
+                    Self::parse_records_encrypted(&data, &mut records, encryption)?;
+                }
+            }
+        } else {
+            // Non-TDE path: parallel segment read
+            let parallel_records = self.read_from_segment_parallel(0)?;
+            records.extend(parallel_records);
+        }
+
+        Ok(records)
+    }
+
+    /// Parse WAL records from raw bytes with optional TDE decryption.
+    ///
+    /// When `encryption` is `Some`, each record's on-disk payload is decrypted
+    /// (AES-256-GCM) before bincode deserialization.
+    fn parse_records_encrypted(
+        data: &[u8],
+        records: &mut Vec<WalRecord>,
+        encryption: Option<&WalEncryption>,
+    ) -> Result<(), StorageError> {
+        // Skip segment header if present (magic + format version = 8 bytes)
+        let mut pos =
+            if data.len() >= WAL_SEGMENT_HEADER_SIZE && &data[0..4] == WAL_MAGIC.as_slice() {
+                let _format_version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                WAL_SEGMENT_HEADER_SIZE
+            } else {
+                0
+            };
+        while pos + 8 <= data.len() {
+            let raw_len_field =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            let is_compressed = (raw_len_field & WAL_COMPRESS_FLAG) != 0;
+            let len = (raw_len_field & !WAL_COMPRESS_FLAG) as usize;
+            let checksum =
+                u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
+            pos += 8;
+
+            if pos + len > data.len() {
+                tracing::warn!("WAL truncated at position {}, stopping recovery", pos);
+                break;
+            }
+
+            let record_data = &data[pos..pos + len];
+            let actual_checksum = crc32fast::hash(record_data);
+            if actual_checksum != checksum {
+                tracing::warn!(
+                    "WAL checksum mismatch at position {}, stopping recovery",
+                    pos
+                );
+                break;
+            }
+
+            // LZ4 decompression (before decryption — compression is applied before encryption
+            // on write, so on read we decompress first, then decrypt).
+            let decompressed: Vec<u8>;
+            let after_decompress: &[u8] = if is_compressed {
+                match wal_lz4_decompress(record_data) {
+                    Ok(d) => { decompressed = d; &decompressed }
+                    Err(e) => {
+                        tracing::warn!("WAL LZ4 decompression error at position {}: {}", pos, e);
+                        break;
+                    }
+                }
+            } else {
+                record_data
+            };
+
+            // Decrypt if TDE is active, otherwise use raw bytes
+            let payload = match encryption {
+                Some(enc) => match enc.decrypt(after_decompress) {
+                    Ok(plain) => plain,
+                    Err(e) => {
+                        tracing::warn!("WAL TDE decryption error at position {}: {}", pos, e);
+                        break;
+                    }
+                },
+                None => after_decompress.to_vec(),
+            };
+
+            match bincode::deserialize::<WalRecord>(&payload) {
+                Ok(record) => records.push(record),
+                Err(e) => {
+                    tracing::warn!("WAL deserialization error at position {}: {}", pos, e);
+                    break;
+                }
+            }
+            pos += len;
+        }
+        Ok(())
+    }
+}
+
+/// Rows for a single table in a checkpoint: Vec<(pk_bytes, row)>.
+pub type CheckpointTableRows = Vec<(Vec<u8>, falcon_common::datum::OwnedRow)>;
+
+/// Checkpoint data: a snapshot of the entire database state at a point in time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointData {
+    /// The catalog (all table schemas) at checkpoint time.
+    pub catalog: falcon_common::schema::Catalog,
+    /// All committed rows per table: (table_id, rows).
+    pub table_data: Vec<(TableId, CheckpointTableRows)>,
+    /// The WAL segment ID at checkpoint time. Recovery replays from this segment onward.
+    pub wal_segment_id: u64,
+    /// The LSN at checkpoint time.
+    pub wal_lsn: u64,
+}
+
+const CHECKPOINT_FILENAME: &str = "checkpoint.bin";
+
+impl CheckpointData {
+    /// Write checkpoint to a file in the given directory.
+    ///
+    /// Uses write-to-temp + rename for crash safety.
+    /// On Windows, `fs::rename` fails if the target exists, so we remove it first.
+    /// The window between remove and rename is acceptable: if we crash after remove
+    /// but before rename, the next startup will find no checkpoint and replay the
+    /// full WAL (safe, just slower).
+    pub fn write_to_dir(&self, dir: &Path) -> Result<(), StorageError> {
+        let path = dir.join(CHECKPOINT_FILENAME);
+        let data =
+            bincode::serialize(self).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let tmp_path = dir.join("checkpoint.tmp");
+        fs::write(&tmp_path, &data).map_err(|e| {
+            StorageError::Wal(format!(
+                "write checkpoint.tmp ({}): {e}",
+                tmp_path.display()
+            ))
+        })?;
+        // Sync the temp file to ensure data is durable before replacing.
+        // On Windows, FlushFileBuffers requires write access — open with write(true).
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp_path)
+            .map_err(|e| StorageError::Wal(format!("open checkpoint.tmp for sync: {e}")))?;
+        f.sync_all()
+            .map_err(|e| StorageError::Wal(format!("sync_all checkpoint.tmp: {e}")))?;
+        drop(f);
+        // On Windows fs::rename fails if target exists; remove it first
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+        fs::rename(&tmp_path, &path).map_err(|e| {
+            StorageError::Wal(format!("rename checkpoint.tmp -> checkpoint.bin: {e}"))
+        })?;
+        Ok(())
+    }
+
+    /// Read checkpoint from a directory, if it exists.
+    pub fn read_from_dir(dir: &Path) -> Result<Option<Self>, StorageError> {
+        let path = dir.join(CHECKPOINT_FILENAME);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = fs::read(&path)?;
+        let ckpt: Self =
+            bincode::deserialize(&data).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        Ok(Some(ckpt))
+    }
+}
+
+/// No-op WAL for pure in-memory mode.
+pub struct NullWal;
+
+impl NullWal {
+    pub const fn append(&self, _record: &WalRecord) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
+    pub const fn flush(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+}

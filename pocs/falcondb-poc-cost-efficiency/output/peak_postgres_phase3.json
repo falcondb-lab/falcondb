@@ -1,0 +1,17 @@
+{
+  "label": "postgres_peak_recovery",
+  "host": "127.0.0.1",
+  "port": 5432,
+  "target_rate": 1000,
+  "actual_rate": 943.6,
+  "duration_sec": 5,
+  "total_committed": 4724,
+  "total_errors": 0,
+  "latency_min_us": 325,
+  "latency_max_us": 1734,
+  "latency_avg_us": 455,
+  "latency_p50_us": 439,
+  "latency_p95_us": 595,
+  "latency_p99_us": 746,
+  "timestamp": "2026-03-04T08:51:26.924340+00:00"
+}

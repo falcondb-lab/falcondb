@@ -1,0 +1,44 @@
+[Unit]
+Description=FalconDB Database Server
+Documentation=https://github.com/falcondb/falcondb
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=falcondb
+Group=falcondb
+
+ExecStart=/usr/bin/falcon --config /etc/falcondb/falcon.toml
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# File descriptor limits (connections + WAL + open files)
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/falcondb /var/log/falcondb
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# OOM handling — prefer killing FalconDB over other services
+OOMScoreAdjust=-900
+
+# Logging: stdout/stderr → journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=falcondb
+
+[Install]
+WantedBy=multi-user.target

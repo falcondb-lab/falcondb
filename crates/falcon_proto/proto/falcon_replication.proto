@@ -1,0 +1,192 @@
+syntax = "proto3";
+
+package falcon.replication;
+
+// ---------------------------------------------------------------------------
+// WAL Streaming Service — M2
+//
+// Primary streams WAL chunks to replicas via bidirectional gRPC streaming.
+// Replicas ack their applied LSN back to primary for lag tracking.
+// ---------------------------------------------------------------------------
+
+service WalReplication {
+  // Server-streaming: replica subscribes to WAL from a given LSN.
+  // Primary pushes WalChunk messages as new WAL records are appended.
+  rpc SubscribeWal(SubscribeWalRequest) returns (stream WalChunkMessage);
+
+  // Unary: replica acks its applied LSN to primary.
+  rpc AckWal(AckWalRequest) returns (AckWalResponse);
+
+  // Unary: replica requests a full checkpoint for bootstrap (new replica join).
+  rpc GetCheckpoint(GetCheckpointRequest) returns (stream CheckpointChunk);
+
+  // Unary: execute a serialized subplan on a remote shard and return results.
+  // Used by the distributed query engine for cross-node scatter/gather.
+  rpc ExecuteSubPlan(ExecuteSubPlanRequest) returns (ExecuteSubPlanResponse);
+
+  // Unary: forward a SQL query to a remote shard leader for execution.
+  rpc ForwardQuery(ForwardQueryRpc) returns (ForwardQueryRpcResponse);
+
+  // Unary: controller pushes config version to a follower node.
+  rpc SyncConfig(SyncConfigRequest) returns (SyncConfigResponse);
+
+  // 2PC: prepare a write on a remote shard (execute but do not commit).
+  rpc Prepare2pc(Prepare2pcRequest) returns (Prepare2pcResponse);
+
+  // 2PC: commit a previously prepared transaction.
+  rpc Commit2pc(Commit2pcRequest) returns (Commit2pcResponse);
+
+  // 2PC: abort a previously prepared transaction.
+  rpc Abort2pc(Abort2pcRequest) returns (Abort2pcResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Subscribe WAL
+// ---------------------------------------------------------------------------
+
+message SubscribeWalRequest {
+  uint64 shard_id = 1;
+  uint64 from_lsn = 2;
+  uint32 max_records_per_chunk = 3;
+}
+
+message WalChunkMessage {
+  uint64 shard_id = 1;
+  uint64 start_lsn = 2;
+  uint64 end_lsn = 3;
+  repeated WalRecordEntry records = 4;
+  uint32 checksum = 5;
+}
+
+message WalRecordEntry {
+  uint64 lsn = 1;
+  // Serialized WalRecord (serde_json or bincode).
+  // Using bytes allows us to evolve the WalRecord enum without proto changes.
+  bytes record_payload = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Ack WAL
+// ---------------------------------------------------------------------------
+
+message AckWalRequest {
+  uint64 shard_id = 1;
+  uint64 replica_id = 2;
+  uint64 applied_lsn = 3;
+}
+
+message AckWalResponse {
+  bool success = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint (for new replica bootstrap)
+// ---------------------------------------------------------------------------
+
+message GetCheckpointRequest {
+  uint64 shard_id = 1;
+}
+
+message CheckpointChunk {
+  // Sequence number within the checkpoint stream (0-indexed).
+  uint32 chunk_index = 1;
+  // Total number of chunks (known after first chunk).
+  uint32 total_chunks = 2;
+  // Serialized checkpoint data fragment.
+  bytes data = 3;
+  // The WAL LSN at checkpoint time — replica replays from here.
+  uint64 checkpoint_lsn = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Execute SubPlan (remote shard execution for scatter/gather)
+// ---------------------------------------------------------------------------
+
+message ExecuteSubPlanRequest {
+  // Target shard ID on the remote node.
+  uint64 shard_id = 1;
+  // Serialized SerializableSubPlan (bincode-encoded).
+  bytes subplan_payload = 2;
+  // Caller-assigned request ID for correlation.
+  uint64 request_id = 3;
+}
+
+message ExecuteSubPlanResponse {
+  bool success = 1;
+  string error = 2;
+  // Bincode-serialized SubPlanResult: (Vec<(String, DataType)>, Vec<OwnedRow>).
+  // Using a single blob avoids proto↔Rust type mapping for DataType variants.
+  bytes result_payload = 3;
+  // Execution latency on the remote shard (microseconds).
+  uint64 execution_us = 4;
+  // Number of result rows (for observability without deserializing payload).
+  uint64 row_count = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Forward Query (SQL-level query forwarding)
+// ---------------------------------------------------------------------------
+
+message ForwardQueryRpc {
+  uint64 shard_id = 1;
+  string sql = 2;
+  uint64 txn_id = 3;
+}
+
+message ForwardQueryRpcResponse {
+  bool success = 1;
+  string error = 2;
+  string result_json = 3;
+  uint64 rows_affected = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Config Sync (controller → follower push)
+// ---------------------------------------------------------------------------
+
+message SyncConfigRequest {
+  uint64 config_version = 1;
+  // Serialized config payload (JSON or bincode). Empty = version-only ping.
+  bytes config_payload = 2;
+}
+
+message SyncConfigResponse {
+  bool success = 1;
+  uint64 applied_version = 2;
+  string error = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-node 2PC
+// ---------------------------------------------------------------------------
+
+message Prepare2pcRequest {
+  uint64 txn_id = 1;
+  uint64 shard_id = 2;
+  string sql = 3;
+}
+
+message Prepare2pcResponse {
+  bool success = 1;
+  string error = 2;
+  uint64 rows_affected = 3;
+}
+
+message Commit2pcRequest {
+  uint64 txn_id = 1;
+  uint64 shard_id = 2;
+}
+
+message Commit2pcResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message Abort2pcRequest {
+  uint64 txn_id = 1;
+  uint64 shard_id = 2;
+}
+
+message Abort2pcResponse {
+  bool success = 1;
+}

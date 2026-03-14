@@ -1,0 +1,23 @@
+pub mod auth;
+pub mod codec;
+pub mod connection_pool;
+pub mod handler;
+mod handler_catalog;
+mod handler_catalog_extended;
+mod handler_copy;
+mod handler_extended;
+mod handler_fast_path;
+mod handler_session;
+mod handler_show;
+mod handler_utils;
+pub mod logical_replication;
+pub mod notify;
+pub mod orm_compat;
+#[cfg(test)]
+mod orm_compat_tests;
+pub mod plan_cache;
+pub mod server;
+pub mod session;
+pub mod session_registry;
+pub mod slow_query_log;
+pub mod tls;

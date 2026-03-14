@@ -1,0 +1,36 @@
+{
+  "name": "falcondb",
+  "version": "0.2.0",
+  "description": "Native protocol driver for FalconDB with HA failover and connection pooling",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "scripts": {
+    "test": "node --test tests/",
+    "lint": "eslint src/ tests/"
+  },
+  "keywords": [
+    "falcondb",
+    "database",
+    "driver",
+    "sql",
+    "oltp",
+    "distributed",
+    "failover",
+    "ha"
+  ],
+  "author": "FalconDB Authors",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/falcondb/falcondb"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "COMPAT_MATRIX.md",
+    "LICENSE"
+  ]
+}

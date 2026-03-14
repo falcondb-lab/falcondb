@@ -1,0 +1,32 @@
+# FalconDB — Benchmark Configuration
+# Used by scripts/bench_pgbench_vs_postgres.sh and related benchmark scripts.
+# Tuned for fair comparison against PostgreSQL with WAL + durability enabled.
+
+[server]
+pg_listen_addr = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:8080"
+node_id = 1
+max_connections = 1024
+statement_timeout_ms = 0
+idle_timeout_ms = 0
+shutdown_drain_timeout_secs = 30
+
+[storage]
+memory_limit_bytes = 0
+wal_enabled = true
+data_dir = "./falcon_bench_data"
+lsm_sync_writes = false
+
+[wal]
+group_commit = true
+flush_interval_us = 1000
+sync_mode = "fdatasync"
+segment_size_bytes = 67108864
+
+[gc]
+enabled = true
+
+[auth]
+method = "trust"
+
+[memory]

@@ -1,0 +1,28 @@
+[package]
+name = "falcon-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+falcon_sql_frontend = { path = "../crates/falcon_sql_frontend" }
+falcon_protocol_pg = { path = "../crates/falcon_protocol_pg" }
+bytes = "1"
+
+# Prevent this from interfering with workspace builds
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_sql_parser"
+path = "fuzz_targets/fuzz_sql_parser.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pg_codec"
+path = "fuzz_targets/fuzz_pg_codec.rs"
+doc = false

@@ -1,0 +1,23 @@
+# FalconDB P2 — GC Stress Benchmark
+# Verifies GC does not spike tail latency under write-heavy load.
+
+[workload]
+duration_sec = 600
+concurrent_connections = 100
+target_tps = 1000
+table_count = 5
+rows_per_table = 500000
+long_txn_ratio = 0.05
+long_txn_duration_ms = 5000
+
+[workload.mix]
+select = 20
+insert = 40
+update = 30
+delete = 10
+
+[thresholds]
+max_gc_sweep_us = 5000
+max_chain_length = 100
+max_p999_ms = 200
+max_gc_budget_exhaustion_rate = 0.10

@@ -1,0 +1,991 @@
+# FalconDB — PG-Compatible Distributed In-Memory OLTP
+
+> English | [简体中文](ARCHITECTURE_zh.md)
+>
+> **Version**: v1.3 · **MSRV**: Rust 1.75 · **Tests**: 4,380+ across 18 crates
+
+## 0. Core Property: Deterministic Commit Guarantee (DCG)
+
+> **If FalconDB returns "committed", that transaction will survive any single-node crash,
+> any failover, and any recovery — with zero exceptions.**
+
+The **Deterministic Commit Guarantee** is enforced by the commit point model (§1 in
+`falcon_common::consistency`): the server never ACKs a commit before the WAL is durable
+under the active commit policy. The four commit phases — **WAL Logged → WAL Durable → Visible →
+Acknowledged** — are forward-only; any regression is rejected as an `InvariantViolation`.
+
+- Evidence: [docs/consistency_evidence_map.md](docs/consistency_evidence_map.md)
+- Timing diagram: [docs/commit_sequence.md](docs/commit_sequence.md)
+- Non-goals: [docs/non_goals.md](docs/non_goals.md)
+
+### v1.3 OLTP Engine Highlights (SingleStore Rowstore Parity)
+
+The following features were added in v1.3 to reach feature parity with SingleStore's
+Rowstore OLTP engine. Each is production-wired, not behind a feature flag.
+
+| Feature | Module | Summary |
+|---------|--------|---------|
+| **Wound-Wait deadlock prevention** | `falcon_txn/src/lock_manager.rs` | O(1) per-acquire wound check replaces WFG cycle-detection on hot path. Older txn wounds younger. |
+| **Timestamp batch allocation** | `falcon_txn/src/manager.rs` | `batch=64` local counter; single atomic fetch per 64 txns → 98% reduction in `ts_counter` CAS contention. |
+| **Fuzzy Checkpoint** | `falcon_storage/src/engine.rs` | Dirty-page set tracking; background `FuzzyCheckpointer` flushes only modified pages, not full snapshots. |
+| **WAL Pipeline Commit** | `falcon_storage/src/wal.rs` | Group commit double-buffer + 500-spin fast path; leader flushes outside lock; followers piggyback. |
+| **Hash Aggregation Spill-to-disk** | `falcon_executor/src/executor_aggregate.rs` | Grace-hash partitioning; spills overflow partitions to temp files; merge-reads on second pass. |
+| **Hot Row Optimization** | `falcon_storage/src/memtable.rs` | `CoalescedUpdateSlot` + `hot_row_write_counts`; `bump_write_count()` at commit; `try_in_place_update()` within txn; `coalesce_hot_rows(watermark)` keeps chain depth-1 across txns. |
+| **Vectorized Filter+Project+Agg** | `falcon_executor/src/vectorized.rs`, `executor_query.rs` | `RecordBatch`-based columnar path for batches ≥256 rows; `vectorized_filter`, `vectorized_project`, `vectorized_aggregate` chained; `is_vectorizable` guard. |
+| **OLTP Benchmark Suite** | `falcon_bench/benches/storage/bench_oltp_scenarios.rs` | 6 Criterion scenarios: point select, insert, update by PK, short transaction (3×update), batch insert (1K–10K rows), hot row update. Run: `cargo bench --bench bench_oltp_scenarios`. |
+
+## 1. Architecture Overview
+
+### 1.1 Data Flow (Happy Path: SELECT)
+
+```
+psql ──TCP──▶ [Protocol Layer (PG Wire)]
+                  │
+                  ▼
+            [SQL Frontend: Parse → Bind → Analyze]
+                  │
+                  ▼
+            [Planner / Router]
+                  │
+          ┌───────┴────────┐
+          │ single-shard   │ multi-shard
+          ▼                ▼
+    [Local Executor]   [Distributed Coordinator]
+          │                │
+          ▼                ▼
+    [Txn Manager ─── MVCC ─── Storage Engine]
+          │
+          ▼
+    [In-Memory Tables + Indexes]
+          │
+          ▼ (async)
+    [WAL / Checkpoint]
+```
+
+### 1.2 Data Flow (Write Path)
+
+```
+Client INSERT ──▶ PG Wire ──▶ SQL Frontend ──▶ Planner/Router
+    ──▶ Txn Begin ──▶ Shard Locate (hash on PK)
+    ──▶ LocalTxn (fast-path, single-shard, no 2PC)
+        │  or GlobalTxn (slow-path, multi-shard, XA-2PC)
+    ──▶ Commit ──▶ Apply to MemTable + WAL fsync
+    ──▶ WAL ship to replicas (async, Scheme A)
+    ──▶ Ack to Client
+```
+
+### 1.3 Node Roles (M1: Primary / Replica)
+
+M1 uses primary–replica topology per shard:
+- **Primary**: accepts reads and writes; WAL-durable commit ack.
+- **Replica**: receives WAL chunks; read-only until promoted.
+- **Promote**: fencing-based failover (fence → catch-up → swap → unfence).
+
+Future (M2+): disaggregate into dedicated compute / storage / meta roles.
+
+---
+
+## 2. Module Inventory
+
+### 2.1 `protocol_pg` — PostgreSQL Wire Protocol
+
+| Item | Detail |
+|------|--------|
+| **Responsibility** | Accept TCP connections, handle PG startup/auth handshake, parse Simple Query / Extended Query messages, serialize RowDescription/DataRow/CommandComplete/Error responses |
+| **Input** | Raw TCP byte stream |
+| **Output** | Parsed `Statement` + session context; serialized PG response frames |
+| **Core types** | `PgConnection`, `PgMessage`, `AuthMethod`, `PgSession` |
+| **Dependencies** | `common` (types, errors) |
+| **Replaceable** | Entire crate can be swapped for MySQL protocol or HTTP/gRPC gateway |
+| **Open-source reuse** | `pgwire` crate (MIT) for message codec; custom session management |
+
+### 2.2 `sql_frontend` — Parser / Analyzer / Binder
+
+| Item | Detail |
+|------|--------|
+| **Responsibility** | SQL text → AST → resolved logical plan with catalog references |
+| **Input** | SQL string + catalog snapshot |
+| **Output** | `BoundStatement` (typed, resolved AST) |
+| **Core types** | `Statement`, `Expr`, `TableRef`, `ColumnRef`, `BoundStatement` |
+| **Dependencies** | `common` (types, catalog trait) |
+| **Replaceable** | Parser backend (sqlparser-rs vs custom PEG), dialect config |
+| **Open-source reuse** | `sqlparser-rs` (Apache-2.0) for parsing; custom binder/analyzer |
+
+### 2.3 `planner_router` — Query Planner, Cost-Based Optimizer & Distributed Router
+
+| Item | Detail |
+|------|--------|
+| **Responsibility** | Logical plan → optimized physical plan; cost-based index/scan selection; join reorder and strategy; determine shard targets; push-down filters |
+| **Input** | `BoundStatement` + shard map + `TableStatsMap` + `IndexedColumns` |
+| **Output** | `PhysicalPlan` (tree of operators with shard annotations) |
+| **Cost-Based Optimizer** | `plan_optimized()` pipeline: BoundStatement → LogicalPlan → optimizer rules → cost-based physical lowering. Uses `estimate_selectivity()` (NDV, MCV, histogram), `seq_scan_cost()` / `index_scan_cost()` / `prefer_index_scan()` to choose SeqScan vs IndexScan. Join strategy (NL/Hash/MergeSort) and reorder based on row counts. Falls back to `plan_with_indexes()` for unsupported statements. |
+| **Auto-Analyze integration** | `StorageEngine::track_rows_modified()` triggers inline `analyze_table()` after threshold modifications (max(row_count/5, 500)); stats flow to CBO via `build_table_stats()` in `handler_extended.rs`. |
+| **Core types** | `LogicalPlan`, `PhysicalPlan`, `ShardTarget`, `PushDown`, `TableStatsMap`, `TableStatsInfo`, `ColumnStatsInfo`, `IndexedColumns` |
+| **Dependencies** | `sql_frontend`, `cluster_meta`, `common` |
+| **Replaceable** | Optimizer rules, cost model, routing strategy |
+
+### 2.4 `executor` — Execution Engine
+
+| Item | Detail |
+|------|--------|
+| **Responsibility** | Execute physical plan operators, produce result rows; enforce per-txn READ ONLY and timeout guards; query governor with structured abort reasons; fused streaming aggregates for large-table scans; vectorized Filter+Project+Agg full path; Hash Aggregation Spill-to-disk; vectorized columnstore GROUP BY AGG pushdown |
+| **Input** | `PhysicalPlan` + txn handle |
+| **Output** | `RowStream` (iterator of `Row`) |
+| **Core types** | `Operator` trait, `SeqScan`, `IndexScan`, `Filter`, `Project`, `Sort`, `Agg`, `Insert`, `Update`, `Delete`, `QueryGovernor`, `GovernorAbortReason`, `ProjAccum`, `exec_fused_aggregate` |
+| **Fast paths** | `exec_fused_aggregate` — single-pass WHERE+GROUP BY+aggregate over MVCC chains (zero row clone); `try_streaming_aggs` — simple column-ref aggregates via `compute_simple_aggs`; `try_pk_ordered_limit` — bounded-heap top-K via `scan_top_k_by_pk`; `exec_columnar_group_agg` — vectorized hash aggregation on ColumnStore `RecordBatch` with zone-map filter pushdown |
+| **Vectorized path (v1.3)** | `vectorized_filter` → `vectorized_project` → `vectorized_aggregate` chained on `RecordBatch` for batches ≥256 rows when `is_vectorizable()` guard passes; avoids per-row `do_project!` macro overhead |
+| **Spill-to-disk (v1.3)** | `HashAggSpillManager` in `executor_aggregate.rs`: grace-hash partition → temp file spill when memory budget exceeded → merge-read pass; zero data loss on OOM |
+| **Dependencies** | `storage` (via trait), `txn`, `common` |
+| **Replaceable** | Row-at-a-time ↔ vectorized; push ↔ pull model |
+
+### 2.5 `txn` — Transaction Manager
+
+| Item | Detail |
+|------|--------|
+| **Responsibility** | Begin/commit/abort transactions; MVCC timestamp allocation; OCC validation (SI); fast-path (LocalTxn) and slow-path (GlobalTxn) commit; Wound-Wait deadlock prevention; batched timestamp allocation; latency histograms; txn history ring buffer; per-txn READ ONLY mode, timeout, and execution summary |
+| **Input** | Transaction operations from executor |
+| **Output** | Txn handles, commit/abort decisions, `TxnStatsSnapshot`, `TxnRecord` history |
+| **Core types** | `TxnManager`, `TxnHandle`, `TxnId`, `Timestamp`, `IsolationLevel`, `TxnType`, `TxnPath`, `TxnContext`, `TxnRecord`, `TxnOutcome`, `LatencyStats`, `TxnExecSummary`, `LockManager`, `WoundWaitManager`, `RowLockSlot` |
+| **Wound-Wait (v1.3)** | `LockManager` holds `wound_wait: WoundWaitManager`. On `acquire()`: check if any holder is younger → wound (abort) younger txn; holder re-acquires. O(1) per acquire vs O(N²) WFG cycle detection. `RowLockSlot` sharded across `SHARD_COUNT` DashMaps. |
+| **Timestamp batching (v1.3)** | `local_ts_counter: AtomicU64` issues timestamps locally up to `local_ts_batch_end`; refills via single `ts_counter.fetch_add(BATCH_SIZE=64)`. Reduces global CAS from 1-per-txn to 1-per-64-txns (≈98% contention reduction). |
+| **Dependencies** | `storage` (version visibility, OCC read-set), `common` |
+| **Replaceable** | OCC vs 2PL vs hybrid; timestamp oracle (local vs distributed) |
+
+### 2.6 `storage` — Multi-Engine Storage Layer
+
+| Item | Detail |
+|------|--------|
+| **Responsibility** | Store tuples with MVCC versions across multiple engines; maintain indexes (hash PK + BTree secondary + unique + composite/covering/prefix); WAL write + recovery; MVCC garbage collection; replication stats; zero-copy row iteration; streaming aggregate computation; auto-analyze with CBO stats feed; CDC with before/after images |
+| **Table dispatch** | Single `engine_tables: DashMap<TableId, TableHandle>` holds all tables. `TableHandle` enum dispatches polymorphically: Rowstore has explicit fast paths for DML/WAL/CDC; disk-backed engines (LSM, RocksDB, redb) go through `as_storage_table() → &dyn StorageTable` for unified DML + USTM prefetch. `as_rowstore()` / `as_columnstore()` provide safe downcasting when engine-specific access is needed (e.g., secondary index queries). |
+| **Engines** | **Rowstore** (in-memory, default) · **LSM** (disk, default feature) · **RocksDB** (`--features rocksdb`, C++ library) · **redb** (`--features redb`, pure Rust) · DiskRowstore (stub) · Columnstore (storage + vectorized AGG pushdown) |
+| **StorageTable trait** | Core DML contract (`insert`/`update`/`delete`/`get`/`scan`/`commit_key`/`abort_key`) with default batch and visibility methods. USTM integration via `prefetch_hint`/`prefetch_evict`/`scan_prefetch_hint` (default no-op; LsmTable overrides). Adding a new engine: impl `StorageTable` + add `TableHandle` variant + wire DDL. |
+| **Core types** | `StorageEngine`, `TableHandle`, `StorageTable` (trait), `MemTable`, `VersionChain`, `SecondaryIndex`, `WalWriter`, `WalRecord`, `GcConfig`, `GcStats`, `GcRunner`, `LsmEngine`, `RocksDbTable`, `RedbTable` |
+| **MVCC** | `VersionData` enum: `Hot(Arc<OwnedRow>)` — in-memory; `Cold(ColdHandle)` — compressed in ColdStore, resolved on demand; `Tombstone`. `with_visible_data` — zero-copy closure-based row access; `for_each_visible` — streaming DashMap iteration without Vec allocation; `scan_top_k_by_pk` — bounded `BinaryHeap` for O(N log K) top-K; `compute_simple_aggs` — single-pass COUNT/SUM/MIN/MAX; Arc-clone elimination on head version |
+| **Hot Row Optimization (v1.3)** | `hot_row_write_counts: DashMap<PK, u32>` per MemTable. `bump_write_count(pk)` called at commit. `try_in_place_update(pk, row, txn_id)`: within same txn, update head version in-place (no new chain node). `coalesce_hot_rows(watermark)`: for rows with write_count ≥ `HOT_ROW_THRESHOLD=8`, collapse visible committed versions into single head, keeping chain depth-1. Called by GC runner. |
+| **Index encapsulation** | Secondary index queries (`index_scan`, `index_range_scan`, `index_lookup_pks`) encapsulated in `MemTable`; `engine_dml.rs` delegates with OCC read tracking only |
+| **Auto-Analyze** | `rows_modified: DashMap<TableId, AtomicU64>` tracks per-table DML counts; `track_rows_modified()` called after commit; triggers inline `analyze_table()` at threshold max(row_count/5, 500); stats stored in `table_stats` and consumed by CBO |
+| **CDC** | Before/after images: `update()` and `delete()` read old row via `table.get()` before mutation when `cdc_manager.is_enabled()`; `emit_update(old_row, new_row)` and `emit_delete(old_row)` provide full change capture |
+| **WAL optimizations** | 8-shard insertion slots (`WalShard`) with thread-local affinity; batch WAL writes (`txn_wal_buf` + `append_multi`); cached flush fd; `WRITE_THROUGH` + leader-follower group commit with 500-spin fast path; double-buffer `flush_split`; combined per-txn DashMap (`TxnLocalState`); WAL recovery counter advancement (`recovered_max_ts`/`recovered_max_txn_id`) |
+| **WAL Pipeline Commit (v1.3)** | `PipelineCommitGroup` in `wal.rs`: leader thread takes ownership of double-buffer under inner lock, flushes (`fdatasync`/`FUA`) outside lock while followers spin up to 500 cycles then park. On flush completion, leader broadcasts wakeup. Reduces per-commit fsync serialization from sequential to pipelined. |
+| **Fuzzy Checkpoint (v1.3)** | `FuzzyCheckpointer` tracks `dirty_pages: DashSet<PageId>` updated on every write path. Background thread flushes only dirty pages instead of full snapshot. Reduces checkpoint I/O by ≥80% under typical OLTP write patterns. |
+| **Dependencies** | `common`, `falcon_segment_codec` |
+| **Replaceable** | Per-table engine selection via `ENGINE=` clause; index impl (BTree, SkipList, ART) |
+
+### 2.7 `raft` — Consensus (production path via `replication.role = "raft_member"`)
+
+> Raft consensus is now on the production path. Set `replication.role = "raft_member"` and
+> configure `[raft]` in `falcon.toml` to use Raft-backed replication instead of WAL-shipping.
+> Single-node mode (`SingleNodeConsensus`) is still available as a no-op default.
+
+| Item | Detail |
+|------|---------|
+| **Responsibility** | Raft consensus for WAL replication; leader election; failover watcher |
+| **Production status** | **Active** when `role = raft_member`. Single-node no-op stub when `role = standalone`. |
+| **Core types** | `RaftGroup`, `RaftConsensus`, `GrpcNetworkFactory`, `RaftTransportService`, `LocalRaftHandle` |
+| **Integration** | `falcon_cluster::RaftShardCoordinator` bridges Raft commits → `StorageEngine` via `ApplyFn` |
+| **Config** | `[raft]` section in `falcon.toml`; `node_id`, `node_ids`, `raft_listen_addr`, `peers` |
+| **Dependencies** | `common`, `openraft`, `tonic` |
+
+### 2.8 `cluster` — Cluster, Replication & Distributed Execution
+
+| Item | Detail |
+|------|--------|
+| **Responsibility** | Shard map; WAL-based primary–replica replication (`WalChunk`, `ReplicationTransport`); promote/failover with fencing; scatter/gather distributed execution; DDL coordination; admission control (read/write/DDL permits); node operational mode (Normal/ReadOnly/Drain) |
+| **Input** | DDL requests, DML routing, WAL chunks, promote commands |
+| **Output** | Replicated state, shard-routed query results, failover metrics |
+| **Core types** | `ShardMap`, `ShardReplicaGroup`, `WalChunk`, `ReplicationTransport`, `InProcessTransport`, `ChannelTransport`, `ReplicationMetrics`, `DistributedQueryEngine`, `FailurePolicy`, `GatherLimits`, `AdmissionControl`, `NodeModeController`, `NodeOperationalMode` |
+| **Dependencies** | `storage`, `txn`, `common` |
+| **Replaceable** | Transport (in-process → gRPC in M2); metadata store (embedded vs etcd) |
+
+### 2.9 `observability` — Metrics / Tracing / Logging
+
+| Item | Detail |
+|------|--------|
+| **Responsibility** | Emit metrics (Prometheus), structured tracing (OpenTelemetry), structured logging |
+| **Input** | Instrumentation points across all layers |
+| **Output** | Prometheus endpoint, OTLP export, log files/stdout |
+| **Core types** | Metric macros, `TraceContext`, log macros |
+| **Dependencies** | `common` |
+| **Open-source reuse** | `metrics` + `metrics-exporter-prometheus`, `tracing` + `tracing-opentelemetry`, `tracing-subscriber` |
+
+### 2.10 `common` — Shared Foundations
+
+| Item | Detail |
+|------|--------|
+| **Responsibility** | Shared types, error hierarchy, config, codec, PG type system, datum representation (incl. `Decimal`), RBAC (roles, privileges, audit) |
+| **Core types** | `Datum`, `DataType`, `Row`, `OwnedRow`, `TableId`, `ShardId`, `NodeId`, `FalconError`, `Config`, `RoleCatalog`, `PrivilegeManager`, `Role`, `Privilege` |
+| **Dependencies** | None (leaf crate) |
+
+---
+
+## 3. MVP Scope
+
+### 3.1 Supported
+
+| Category | Scope |
+|----------|-------|
+| **Protocol** | PG wire Simple Query + Extended Query (Parse/Bind/Describe/Execute/Sync/Close/Flush); trust auth; text format; system catalog shim (version(), SET, SHOW, \dt) |
+| **SQL DDL** | `CREATE TABLE [IF NOT EXISTS] (col type [PRIMARY KEY] [NOT NULL] [DEFAULT val] [CHECK (expr)] [UNIQUE] [REFERENCES tbl(col) [ON DELETE CASCADE/SET NULL/SET DEFAULT] [ON UPDATE CASCADE/SET NULL/SET DEFAULT]], ...)`, `SERIAL`/`BIGSERIAL` auto-increment columns, `DROP TABLE [IF EXISTS]`, `TRUNCATE TABLE`, `ALTER TABLE ADD COLUMN / DROP COLUMN / RENAME COLUMN / RENAME TO / ALTER COLUMN TYPE`, `CREATE INDEX`, `CREATE VIEW [OR REPLACE]`, `DROP VIEW [IF EXISTS]` |
+| **SQL DML** | `INSERT` (full/partial with named columns), `INSERT ... SELECT`, `INSERT ... ON CONFLICT DO NOTHING / DO UPDATE` (upsert), `UPDATE`, `DELETE` (all with `RETURNING` support), `SELECT` (with/without `FROM`), `WHERE`, `ORDER BY` (multi-column, expression-based e.g. `ORDER BY price * qty`, incl. non-projected columns via hidden projections), `LIMIT`, `OFFSET`, `DISTINCT`, `GROUP BY`, `HAVING` (with aggregate expressions e.g. `HAVING COUNT(*) > 5`), aggregates (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `STRING_AGG`, `BOOL_AND`, `BOOL_OR`, `ARRAY_AGG` with `DISTINCT` support; expression arguments e.g. `SUM(price * qty)`), `LIKE`, `ILIKE`, `BETWEEN`, `IN`, `IS NULL`/`IS NOT NULL`, `CAST`, `NOT`, unary `+`/`-`, `JOIN` (INNER, LEFT, RIGHT, CROSS, FULL OUTER; `ON`/`USING`/`NATURAL`; implicit comma-join), subqueries (scalar, `IN`/`NOT IN`, `EXISTS`/`NOT EXISTS`), `CASE WHEN`/`COALESCE`/`NULLIF`, CTEs (`WITH ... AS`), recursive CTEs (`WITH RECURSIVE ... AS (base UNION ALL recursive)`), correlated subqueries, `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`, `EXPLAIN`, table aliases (`AS`), column aliases (`AS`), string concat operator (`||`), string functions (`UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`, `CONCAT`, `CONCAT_WS`, `TRIM`, `BTRIM`, `LTRIM`, `RTRIM`, `REPLACE`, `TRANSLATE`, `POSITION`/`STRPOS`, `SPLIT_PART`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `REPEAT`, `REVERSE`, `INITCAP`), math functions (`ABS`, `ROUND`, `CEIL`, `FLOOR`, `GREATEST`, `LEAST`, `POWER`, `SQRT`, `SIGN`, `TRUNC`, `LN`, `LOG`, `EXP`, `PI`, `MOD`, `DEGREES`, `RADIANS`, `CBRT`, `FACTORIAL`, `GCD`, `LCM`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2`, `LOG10`, `LOG2`, `COT`, `SINH`, `COSH`, `TANH`, `WIDTH_BUCKET`, `FACTORIAL`, `DIV`, `SCALE`, `ISFINITE`, `ISINF`, `ISNAN`, `TRIM_SCALE`, `MIN_SCALE`, `CEILING`, `TRUNC_PRECISION`, `ROUND_PRECISION`, `NORMALIZE`, `HASHTEXT`, `CRC32`, `LEVENSHTEIN`, `SOUNDEX`, `DIFFERENCE`, `HAMMING_DISTANCE`, `ASINH`, `ACOSH`, `ATANH`, `BIT_COUNT`, `BIT_NOT`, `SIMILARITY`, `CLAMP`, `REGEXP_ESCAPE`, `WORD_COUNT`, `CAMEL_CASE`, `SNAKE_CASE`, `TITLE_CASE`, `KEBAB_CASE`, `TRUNCATE_TEXT`, `PAD_CENTER`, `SQUEEZE`, `STRIP_TAGS`, `MASK_TEXT`, `EXTRACT_NUMBERS`, `SLUGIFY`, `EXTRACT_EMAILS`, `EXTRACT_URLS`, `EXTRACT_WORDS`, `COUNT_VOWELS`, `COUNT_CONSONANTS`, `IS_PALINDROME`, `IS_NUMERIC`, `IS_ALPHA`, `ROT13`, `CAESAR_CIPHER`, `CHAR_FREQUENCY`, `WRAP_TEXT`, `STRING_REPEAT_PATTERN`, `INITIALS`, `ABBREVIATE`, `COUNT_WORDS_UNIQUE`, `REMOVE_ACCENTS`, `SENTENCE_CASE`, `SWAP_CASE`, `SURROUND`, `EXTRACT_DOMAIN`, `EXTRACT_EXTENSION`, `EXTRACT_HASHTAGS`, `EXTRACT_MENTIONS`, `MASK_EMAIL`, `MASK_CREDIT_CARD`, `STRING_NGRAMS`, `STRING_DISTANCE_JACCARD`, `STRING_ENTROPY`, `STRING_COMMON_PREFIX`, `STRING_COMMON_SUFFIX`, `STRING_IS_EMAIL`, `STRING_IS_URL`, `STRING_WORD_AT`, `STRING_CHAR_AT`, `STRING_COUNT_CHAR`, `STRING_BETWEEN`, `STRING_BEFORE`, `STRING_AFTER`, `STRING_TRUNCATE_WORDS`, `STRING_PAD_LEFT_ZEROS`, `STRING_REMOVE_PREFIX`, `STRING_REMOVE_SUFFIX`, `STRING_ENSURE_PREFIX`, `STRING_ENSURE_SUFFIX`, `STRING_COLLAPSE_SPACES`, `STRING_IS_BLANK`, `STRING_CENTER`, `STRING_LJUST`, `STRING_RJUST`, `STRING_ZFILL`, `STRING_RJUST_CHAR`, `STRING_LJUST_CHAR`, `STRING_SPLIT_FIRST`, `STRING_SPLIT_LAST`, `STRING_TITLE_WORDS`, `STRING_SNAKE_WORDS`, `STRING_KEBAB_WORDS`, `STRING_CAMEL_WORDS`, `STRING_WRAP_QUOTES`, `STRING_UNWRAP_QUOTES`, `STRING_COUNT_WORDS`, `STRING_WORD_FREQUENCY`, `STRING_PASCAL_WORDS`, `STRING_DOT_WORDS`, `STRING_PATH_WORDS`, `STRING_CONSTANT_CASE`, `STRING_HEADER_CASE`, `STRING_TRAIN_CASE`, `STRING_SPLIT_COUNT`, `STRING_JOIN_WITH`, `STRING_MASK_LEFT`, `STRING_MASK_RIGHT`, `STRING_REPEAT_N`, `STRING_ALTERNATE_CASE`, `STRING_STRIP_PUNCTUATION`, `STRING_ONLY_DIGITS`, `STRING_ONLY_ALPHA`, `STRING_ONLY_ALNUM`, `STRING_ONLY_UPPER`, `STRING_ONLY_LOWER`, `STRING_IS_UPPER`, `STRING_IS_LOWER`, `STRING_IS_TITLE`, `STRING_CAPITALIZE`, `STRING_DECAPITALIZE`, `STRING_TOGGLE_CASE`, `STRING_WORD_WRAP`, `STRING_INDENT`, `STRING_DEDUPLICATE`, `STRING_SQUEEZE_CHAR`, `STRING_MIRROR`, `STRING_INTERLEAVE`, `STRING_HAMMING_DISTANCE`, `STRING_LEVENSHTEIN_DISTANCE`, `STRING_SOUNDEX`, `STRING_METAPHONE`, `STRING_DOUBLE_METAPHONE`, `STRING_COLOGNE_PHONETIC`, `STRING_NYSIIS`, `STRING_MATCH_RATING`, `STRING_CAVERPHONE`, `STRING_DAITCH_MOKOTOFF`, `STRING_BEIDER_MORSE`, `STRING_PHONEX`, `STRING_RUSSELL_SOUNDEX`, `STRING_REFINED_SOUNDEX`, `STRING_JARO_DISTANCE`, `STRING_JARO_WINKLER_DISTANCE`, `STRING_DAMERAU_LEVENSHTEIN`, `STRING_OPTIMAL_ALIGNMENT`, `STRING_LONGEST_COMMON_SUBSTRING`, `STRING_LONGEST_COMMON_SUBSEQUENCE`, `STRING_SORENSEN_DICE`, `STRING_OVERLAP_COEFFICIENT`, `STRING_JACCARD_INDEX`, `STRING_COSINE_SIMILARITY`, `STRING_HAMMING_SIMILARITY`, `STRING_TVERSKY_INDEX`, `STRING_NGRAM_SIMILARITY`, `STRING_WEIGHTED_LEVENSHTEIN`, `STRING_NORMALIZED_LEVENSHTEIN`, `STRING_NORMALIZED_HAMMING`, `STRING_PREFIX_DISTANCE`, `STRING_SUFFIX_DISTANCE`, `STRING_RATCLIFF_OBERSHELP`, `STRING_MONGE_ELKAN`, `STRING_BAG_DISTANCE`, `STRING_SMITH_WATERMAN`, `STRING_NEEDLEMAN_WUNSCH`, `STRING_JARO_SIMILARITY`, `STRING_EDITEX`, `STRING_STRCMP95`, `STRING_LCSR`, `STRING_MLIPNS`, `STRING_YUJIAN_BO`, `STRING_SIFT4`, `STRING_ITERATIVE_SUBSTRING`, `STRING_BISIM`, `STRING_GOTOH`, `STRING_STRCMP95_LONG`, `STRING_PREFIX_SIMILARITY`, `STRING_JARO_WINKLER_SIMILARITY`, `STRING_SUFFIX_SIMILARITY`, `STRING_CONTAINMENT_SIMILARITY`, `STRING_POSTFIX_DISTANCE`, `STRING_COMMON_SUBSTRING_COUNT`, `STRING_LCS_DISTANCE`, `STRING_RUN_LENGTH_DISTANCE`, `STRING_CHAR_FREQ_DISTANCE`, `STRING_VOWEL_CONSONANT_RATIO`, `STRING_ALPHABETIC_SORT`, `STRING_UNIQUE_CHARS`, `STRING_WORD_COUNT`, `STRING_CHAR_POSITION_SUM`, `STRING_CONSONANT_COUNT`, `STRING_DIGIT_COUNT`, `STRING_CAMEL_CASE`, `STRING_SNAKE_CASE`, `STRING_KEBAB_CASE`, `STRING_TITLE_CASE`, `STRING_IS_PALINDROME`, `STRING_IS_ANAGRAM`, `STRING_COUNT_SUBSTRING`, `STRING_ZIGZAG`, `STRING_CAESAR_CIPHER`, `STRING_ROT13`, `STRING_ATBASH`, `STRING_VIGENERE`, `STRING_MORSE_ENCODE`, `STRING_MORSE_DECODE`, `STRING_RUN_LENGTH_ENCODE`, `STRING_RUN_LENGTH_DECODE`, `STRING_BINARY_ENCODE`, `STRING_BINARY_DECODE`, `STRING_HEX_ENCODE`, `STRING_HEX_DECODE`, `STRING_OCTAL_ENCODE`, `STRING_OCTAL_DECODE`, `STRING_BASE64_ENCODE`, `STRING_BASE64_DECODE`, `STRING_URL_ENCODE`, `STRING_URL_DECODE`, `STRING_CSV_ENCODE`, `STRING_CSV_DECODE`, `STRING_JSON_ENCODE`, `STRING_JSON_DECODE`, `STRING_XML_ENCODE`, `STRING_XML_DECODE`, `STRING_HTML_ENCODE`, `STRING_HTML_DECODE`, `STRING_SHELL_ENCODE`, `STRING_SHELL_DECODE`, `STRING_REGEX_ENCODE`, `STRING_REGEX_DECODE`, `STRING_SQL_ENCODE`, `STRING_SQL_DECODE`, `STRING_MARKDOWN_ENCODE`, `STRING_MARKDOWN_DECODE`, `STRING_LATEX_ENCODE`, `STRING_LATEX_DECODE`, `STRING_YAML_ENCODE`, `STRING_YAML_DECODE`, `STRING_TOML_ENCODE`, `STRING_TOML_DECODE`, `STRING_INI_ENCODE`, `STRING_INI_DECODE`, `STRING_PROPERTIES_ENCODE`, `STRING_PROPERTIES_DECODE`, `STRING_TSV_ENCODE`, `STRING_TSV_DECODE`, `STRING_DSV_ENCODE`, `STRING_DSV_DECODE`, `STRING_SSV_ENCODE`, `STRING_SSV_DECODE`, `STRING_PSV_ENCODE`, `STRING_PSV_DECODE`, `STRING_FSV_ENCODE`, `STRING_FSV_DECODE`, `STRING_KSV_ENCODE`, `STRING_KSV_DECODE`, `STRING_NSV_ENCODE`, `STRING_NSV_DECODE`, `STRING_HSV_ENCODE`, `STRING_HSV_DECODE`, `STRING_ASV_ENCODE`, `STRING_ASV_DECODE`, `STRING_ESV_ENCODE`, `STRING_ESV_DECODE`, `STRING_XSV_ENCODE`, `STRING_XSV_DECODE`, `STRING_QSV_ENCODE`, `STRING_QSV_DECODE`, `STRING_ZSV_ENCODE`, `STRING_ZSV_DECODE`, `STRING_WSV_ENCODE`, `STRING_WSV_DECODE`, `STRING_BSV_ENCODE`, `STRING_BSV_DECODE`, `STRING_USV_ENCODE`, `STRING_USV_DECODE`, `STRING_GSV_ENCODE`, `STRING_GSV_DECODE`, `STRING_YSV_ENCODE`, `STRING_YSV_DECODE`, `STRING_JSV_ENCODE`, `STRING_JSV_DECODE`, `STRING_MSV_ENCODE`, `STRING_MSV_DECODE`, `STRING_OSV_ENCODE`, `STRING_OSV_DECODE`, `STRING_RSV_ENCODE`, `STRING_RSV_DECODE`, `STRING_VSV_ENCODE`, `STRING_VSV_DECODE`, `STRING_ISV_ENCODE`, `STRING_ISV_DECODE`, `STRING_LSV_ENCODE`, `STRING_LSV_DECODE`, `STRING_DDSV_ENCODE`, `STRING_DDSV_DECODE`, `STRING_EESV_ENCODE`, `STRING_EESV_DECODE`, `STRING_FFSV_ENCODE`, `STRING_FFSV_DECODE`, `STRING_GGSV_ENCODE`, `STRING_GGSV_DECODE`, `STRING_HHSV_ENCODE`, `STRING_HHSV_DECODE`, `STRING_IISV_ENCODE`, `STRING_IISV_DECODE`, `STRING_JJSV_ENCODE`, `STRING_JJSV_DECODE`, `STRING_KKSV_ENCODE`, `STRING_KKSV_DECODE`, `STRING_LLSV_ENCODE`, `STRING_LLSV_DECODE`, `STRING_MMSV_ENCODE`, `STRING_MMSV_DECODE`, `STRING_NNSV_ENCODE`, `STRING_NNSV_DECODE`, `STRING_OOSV_ENCODE`, `STRING_OOSV_DECODE`, `STRING_PPSV_ENCODE`, `STRING_PPSV_DECODE`, `STRING_QQSV_ENCODE`, `STRING_QQSV_DECODE`, `STRING_RRSV_ENCODE`, `STRING_RRSV_DECODE`, `STRING_SSSV_ENCODE`, `STRING_SSSV_DECODE`, `STRING_TTSV_ENCODE`, `STRING_TTSV_DECODE`, `STRING_UUSV_ENCODE`, `STRING_UUSV_DECODE`, `STRING_VVSV_ENCODE`, `STRING_VVSV_DECODE`, `STRING_WWSV_ENCODE`, `STRING_WWSV_DECODE`, `STRING_XXSV_ENCODE`, `STRING_XXSV_DECODE`, `STRING_YYSV_ENCODE`, `STRING_YYSV_DECODE`, `STRING_ZZSV_ENCODE`, `STRING_ZZSV_DECODE`, `STRING_AATV_ENCODE`, `STRING_AATV_DECODE`, `STRING_BBTV_ENCODE`, `STRING_BBTV_DECODE`, `STRING_CCTV_ENCODE`, `STRING_CCTV_DECODE`, `STRING_DDTV_ENCODE`, `STRING_DDTV_DECODE`, `STRING_EETV_ENCODE`, `STRING_EETV_DECODE`, `STRING_FFTV_ENCODE`, `STRING_FFTV_DECODE`, `STRING_GGTV_ENCODE`, `STRING_GGTV_DECODE`, `STRING_HHTV_ENCODE`, `STRING_HHTV_DECODE`, `STRING_IITV_ENCODE`, `STRING_IITV_DECODE`, `STRING_JJTV_ENCODE`, `STRING_JJTV_DECODE`, `STRING_KKTV_ENCODE`, `STRING_KKTV_DECODE`, `STRING_LLTV_ENCODE`, `STRING_LLTV_DECODE`, `STRING_MMTV_ENCODE`, `STRING_MMTV_DECODE`, `STRING_NNTV_ENCODE`, `STRING_NNTV_DECODE`, `STRING_OOTV_ENCODE`, `STRING_OOTV_DECODE`, `STRING_PPTV_ENCODE`, `STRING_PPTV_DECODE`, `STRING_QQTV_ENCODE`, `STRING_QQTV_DECODE`, `STRING_RRTV_ENCODE`, `STRING_RRTV_DECODE`, `STRING_SSTV_ENCODE`, `STRING_SSTV_DECODE`, `STRING_TTTV_ENCODE`, `STRING_TTTV_DECODE`, `STRING_UUTV_ENCODE`, `STRING_UUTV_DECODE`, `STRING_VVTV_ENCODE`, `STRING_VVTV_DECODE`, `STRING_WWTV_ENCODE`, `STRING_WWTV_DECODE`, `STRING_XXTV_ENCODE`, `STRING_XXTV_DECODE`, `STRING_YYTV_ENCODE`, `STRING_YYTV_DECODE`, `STRING_ZZTV_ENCODE`, `STRING_ZZTV_DECODE`, `STRING_AAUV_ENCODE`, `STRING_AAUV_DECODE`, `STRING_BBUV_ENCODE`, `STRING_BBUV_DECODE`, `STRING_CCUV_ENCODE`, `STRING_CCUV_DECODE`, `STRING_DDUV_ENCODE`, `STRING_DDUV_DECODE`, `STRING_EEUV_ENCODE`, `STRING_EEUV_DECODE`, `STRING_FFUV_ENCODE`, `STRING_FFUV_DECODE`, `STRING_GGUV_ENCODE`, `STRING_GGUV_DECODE`, `STRING_HHUV_ENCODE`, `STRING_HHUV_DECODE`, `STRING_IIUV_ENCODE`, `STRING_IIUV_DECODE`, `STRING_JJUV_ENCODE`, `STRING_JJUV_DECODE`, `STRING_KKUV_ENCODE`, `STRING_KKUV_DECODE`, `STRING_LLUV_ENCODE`, `STRING_LLUV_DECODE`, `STRING_MMUV_ENCODE`, `STRING_MMUV_DECODE`, `STRING_NNUV_ENCODE`, `STRING_NNUV_DECODE`, `STRING_OOUV_ENCODE`, `STRING_OOUV_DECODE`, `STRING_PPUV_ENCODE`, `STRING_PPUV_DECODE`, `STRING_QQUV_ENCODE`, `STRING_QQUV_DECODE`, `STRING_RRUV_ENCODE`, `STRING_RRUV_DECODE`, `STRING_SSUV_ENCODE`, `STRING_SSUV_DECODE`, `STRING_TTUV_ENCODE`, `STRING_TTUV_DECODE`, `STRING_UUUV_ENCODE`, `STRING_UUUV_DECODE`, `STRING_VVUV_ENCODE`, `STRING_VVUV_DECODE`, `STRING_WWUV_ENCODE`, `STRING_WWUV_DECODE`, `STRING_XXUV_ENCODE`, `STRING_XXUV_DECODE`, `STRING_YYUV_ENCODE`, `STRING_YYUV_DECODE`, `STRING_ZZUV_ENCODE`, `STRING_ZZUV_DECODE`, `STRING_AAWV_ENCODE`, `STRING_AAWV_DECODE`, `STRING_BBWV_ENCODE`, `STRING_BBWV_DECODE`, `STRING_CCWV_ENCODE`, `STRING_CCWV_DECODE`, `STRING_DDWV_ENCODE`, `STRING_DDWV_DECODE`, `STRING_EEWV_ENCODE`, `STRING_EEWV_DECODE`, `STRING_FFWV_ENCODE`, `STRING_FFWV_DECODE`, `STRING_GGWV_ENCODE`, `STRING_GGWV_DECODE`, `STRING_HHWV_ENCODE`, `STRING_HHWV_DECODE`, `STRING_IIWV_ENCODE`, `STRING_IIWV_DECODE`, `STRING_JJWV_ENCODE`, `STRING_JJWV_DECODE`, `STRING_KKWV_ENCODE`, `STRING_KKWV_DECODE`, `STRING_LLWV_ENCODE`, `STRING_LLWV_DECODE`, `STRING_MMWV_ENCODE`, `STRING_MMWV_DECODE`, `STRING_NNWV_ENCODE`, `STRING_NNWV_DECODE`, `STRING_OOWV_ENCODE`, `STRING_OOWV_DECODE`, `STRING_PPWV_ENCODE`, `STRING_PPWV_DECODE`, `STRING_QQWV_ENCODE`, `STRING_QQWV_DECODE`, `STRING_RRWV_ENCODE`, `STRING_RRWV_DECODE`, `STRING_SSWV_ENCODE`, `STRING_SSWV_DECODE`, `STRING_TTWV_ENCODE`, `STRING_TTWV_DECODE`, `STRING_UUWV_ENCODE`, `STRING_UUWV_DECODE`, `STRING_VVWV_ENCODE`, `STRING_VVWV_DECODE`, `STRING_WWWV_ENCODE`, `STRING_WWWV_DECODE`, `STRING_XXWV_ENCODE`, `STRING_XXWV_DECODE`, `STRING_YYWV_ENCODE`, `STRING_YYWV_DECODE`, `STRING_ZZWV_ENCODE`, `STRING_ZZWV_DECODE`, `STRING_AAXV_ENCODE`, `STRING_AAXV_DECODE`, `STRING_BBXV_ENCODE`, `STRING_BBXV_DECODE`, `STRING_CCXV_ENCODE`, `STRING_CCXV_DECODE`, `STRING_DDXV_ENCODE`, `STRING_DDXV_DECODE`, `STRING_EEXV_ENCODE`, `STRING_EEXV_DECODE`, `STRING_FFXV_ENCODE`, `STRING_FFXV_DECODE`, `STRING_GGXV_ENCODE`, `STRING_GGXV_DECODE`, `STRING_HHXV_ENCODE`, `STRING_HHXV_DECODE`, `STRING_IIXV_ENCODE`, `STRING_IIXV_DECODE`, `STRING_JJXV_ENCODE`, `STRING_JJXV_DECODE`, `STRING_KKXV_ENCODE`, `STRING_KKXV_DECODE`, `STRING_LLXV_ENCODE`, `STRING_LLXV_DECODE`, `STRING_MMXV_ENCODE`, `STRING_MMXV_DECODE`, `STRING_NNXV_ENCODE`, `STRING_NNXV_DECODE`, `STRING_OOXV_ENCODE`, `STRING_OOXV_DECODE`, `STRING_PPXV_ENCODE`, `STRING_PPXV_DECODE`, `STRING_QQXV_ENCODE`, `STRING_QQXV_DECODE`, `STRING_RRXV_ENCODE`, `STRING_RRXV_DECODE`, `STRING_SSXV_ENCODE`, `STRING_SSXV_DECODE`, `STRING_TTXV_ENCODE`, `STRING_TTXV_DECODE`, `STRING_UUXV_ENCODE`, `STRING_UUXV_DECODE`, `STRING_VVXV_ENCODE`, `STRING_VVXV_DECODE`, `ARRAY_MATRIX_ROW_ABS_DEV19`, `ARRAY_MATRIX_COLUMN_LOG_DEV19`, `STRING_WWXV_ENCODE`, `STRING_WWXV_DECODE`, `ARRAY_MATRIX_ROW_RMS_DEV19`, `ARRAY_MATRIX_COLUMN_ABS_RANGE19`, `STRING_XXXV_ENCODE`, `STRING_XXXV_DECODE`, `ARRAY_MATRIX_ROW_LOG_DEV19`, `ARRAY_MATRIX_COLUMN_RMS_RANGE19`, `STRING_YYXV_ENCODE`, `STRING_YYXV_DECODE`, `ARRAY_MATRIX_ROW_ABS_DEV20`, `ARRAY_MATRIX_COLUMN_LOG_DEV20`, `STRING_ZZXV_ENCODE`, `STRING_ZZXV_DECODE`, `ARRAY_MATRIX_ROW_RMS_RANGE20`, `ARRAY_MATRIX_COLUMN_ABS_DEV20`, `STRING_AAYV_ENCODE`, `STRING_AAYV_DECODE`, `ARRAY_MATRIX_ROW_LOG_RANGE21`, `ARRAY_MATRIX_COLUMN_RMS_DEV21`, `STRING_BBYV_ENCODE`, `STRING_BBYV_DECODE`, `ARRAY_MATRIX_ROW_ABS_RANGE21`, `ARRAY_MATRIX_COLUMN_RMS_NORM21`, `STRING_CCYV_ENCODE`, `STRING_CCYV_DECODE`, `ARRAY_MATRIX_ROW_LOG_NORM21`, `ARRAY_MATRIX_COLUMN_ABS_RANGE21`, `STRING_DDYV_ENCODE`, `STRING_DDYV_DECODE`, `ARRAY_MATRIX_ROW_RMS_RANGE21`, `ARRAY_MATRIX_COLUMN_LOG_NORM21`, `STRING_EEYV_ENCODE`, `STRING_EEYV_DECODE`, `ARRAY_MATRIX_ROW_ABS_NORM21`, `ARRAY_MATRIX_COLUMN_RMS_DEV22`, `STRING_FFYV_ENCODE`, `STRING_FFYV_DECODE`, `ARRAY_MATRIX_ROW_LOG_NORM22`, `ARRAY_MATRIX_COLUMN_ABS_DEV22`, `STRING_GGYV_ENCODE`, `STRING_GGYV_DECODE`, `ARRAY_MATRIX_ROW_RMS_NORM22`, `ARRAY_MATRIX_COLUMN_LOG_DEV22`, `STRING_HHYV_ENCODE`, `STRING_HHYV_DECODE`, `ARRAY_MATRIX_ROW_ABS_RANGE22`, `ARRAY_MATRIX_COLUMN_RMS_NORM22`, `STRING_IIYV_ENCODE`, `STRING_IIYV_DECODE`, `ARRAY_MATRIX_ROW_LOG_RANGE22`, `ARRAY_MATRIX_COLUMN_ABS_RANGE23`, `STRING_JJYV_ENCODE`, `STRING_JJYV_DECODE`, `ARRAY_MATRIX_ROW_RMS_RANGE22`, `ARRAY_MATRIX_COLUMN_LOG_NORM23`, `STRING_KKYV_ENCODE`, `STRING_KKYV_DECODE`, `ARRAY_MATRIX_ROW_ABS_DEV22`, `ARRAY_MATRIX_COLUMN_RMS_DEV23`, `STRING_LLYV_ENCODE`, `STRING_LLYV_DECODE`, `ARRAY_MATRIX_ROW_LOG_DEV22`, `ARRAY_MATRIX_COLUMN_ABS_DEV23`, `STRING_MMYV_ENCODE`, `STRING_MMYV_DECODE`, `ARRAY_MATRIX_ROW_RMS_DEV22`, `ARRAY_MATRIX_COLUMN_LOG_DEV23`, `STRING_NNYV_ENCODE`, `STRING_NNYV_DECODE`, `ARRAY_MATRIX_ROW_ABS_NORM22`, `ARRAY_MATRIX_COLUMN_RMS_NORM23`, `STRING_OOYV_ENCODE`, `STRING_OOYV_DECODE`, `ARRAY_MATRIX_ROW_LOG_RANGE23`, `ARRAY_MATRIX_COLUMN_RMS_RANGE23`, `STRING_PPYV_ENCODE`, `STRING_PPYV_DECODE`, `ARRAY_MATRIX_ROW_RMS_DEV23`, `ARRAY_MATRIX_COLUMN_LOG_NORM24`, `STRING_QQYV_ENCODE`, `STRING_QQYV_DECODE`, `ARRAY_MATRIX_ROW_ABS_NORM23`, `ARRAY_MATRIX_COLUMN_ABS_DEV24`, `STRING_RRYV_ENCODE`, `STRING_RRYV_DECODE`, `ARRAY_MATRIX_ROW_LOG_RANGE24`, `ARRAY_MATRIX_COLUMN_RMS_RANGE24`, `STRING_SSYV_ENCODE`, `STRING_SSYV_DECODE`, `ARRAY_MATRIX_ROW_RMS_NORM24`, `ARRAY_MATRIX_COLUMN_LOG_DEV24`, `STRING_TTYV_ENCODE`, `STRING_TTYV_DECODE`, `ARRAY_MATRIX_ROW_LOG_NORM24`, `ARRAY_MATRIX_COLUMN_ABS_RANGE24`, `STRING_UUYV_ENCODE`, `STRING_UUYV_DECODE`), array functions (`ARRAY_LENGTH`, `ARRAY_POSITION`, `ARRAY_APPEND`, `ARRAY_PREPEND`, `ARRAY_REMOVE`, `ARRAY_REPLACE`, `ARRAY_CAT`, `ARRAY_TO_STRING`, `STRING_TO_ARRAY`, `ARRAY_UPPER`, `ARRAY_LOWER`, `ARRAY_DIMS`, `ARRAY_FILL`, `ARRAY_REVERSE`, `ARRAY_DISTINCT`, `ARRAY_SORT`, `ARRAY_CONTAINS`, `ARRAY_OVERLAP`, `ARRAY_SLICE`, `ARRAY_INTERSECT`, `ARRAY_EXCEPT`, `ARRAY_COMPACT`, `ARRAY_FLATTEN`, `ARRAY_NDIMS`, `UNNEST` (scalar), `ARRAY_ZIP`, `ARRAY_POSITIONS`, `ARRAY_TO_JSON`, `STRING_TO_TABLE` (scalar), `ARRAY_GENERATE`, `ARRAY_SAMPLE`, `ARRAY_SHUFFLE`, `ARRAY_REPEAT`, `ARRAY_ROTATE`, `ARRAY_TO_SET`, `OVERLAY_ARRAY`, `ARRAY_MIN`, `ARRAY_MAX`, `ARRAY_SUM`, `ARRAY_AVG`, `ARRAY_PRODUCT`, `ARRAY_MEDIAN`, `ARRAY_MODE`, `ARRAY_EVERY`, `ARRAY_SOME`, `ARRAY_STDDEV`, `ARRAY_VARIANCE`, `ARRAY_CUMSUM`, `ARRAY_CHUNK`, `ARRAY_PAIRWISE`, `ARRAY_PERCENTILE`, `ARRAY_UNIQUE_COUNT`, `ARRAY_MOVING_AVG`, `ARRAY_DOT_PRODUCT`, `ARRAY_NORMALIZE`, `ARRAY_COSINE_SIMILARITY`, `ARRAY_EUCLIDEAN_DISTANCE`, `ARRAY_MANHATTAN_DISTANCE`, `ARRAY_LINSPACE`, `ARRAY_TAKE_WHILE_POSITIVE`, `ARRAY_DROP_WHILE_POSITIVE`, `ARRAY_WEIGHTED_AVG`, `ARRAY_MAP_DOUBLE`, `ARRAY_MAP_SQUARE`, `ARRAY_MAP_ABS`, `ARRAY_ENTROPY`, `ARRAY_INTERLEAVE`, `ARRAY_ADJACENT_DIFF`, `ARRAY_RUNNING_MAX`, `ARRAY_RUNNING_MIN`, `ARRAY_SOFTMAX`, `ARRAY_ARGMAX`, `ARRAY_ARGMIN`, `ARRAY_CUMPROD`, `ARRAY_ZSCORE`, `ARRAY_MINMAX_SCALE`, `ARRAY_CLIP`, `ARRAY_THRESHOLD`, `ARRAY_RANK`, `ARRAY_DENSE_RANK`, `ARRAY_EMA`, `ARRAY_CONVOLVE`, `ARRAY_LOGSPACE`, `ARRAY_GEOMSPACE`, `ARRAY_HISTOGRAM`, `ARRAY_DIFF_SET`, `ARRAY_UNION`, `ARRAY_SCAN_SUM`, `ARRAY_SCAN_PRODUCT`, `ARRAY_WINDOW_SUM`, `ARRAY_WINDOW_AVG`, `ARRAY_PERCENTILE_RANK`, `ARRAY_NTILE`, `ARRAY_RATIO`, `ARRAY_SECOND_MAX`, `ARRAY_SECOND_MIN`, `ARRAY_TOPK`, `ARRAY_BOTTOMK`, `ARRAY_KURTOSIS`, `ARRAY_SKEWNESS`, `ARRAY_GROUP_BY_SIGN`, `ARRAY_PARTITION`, `ARRAY_COVARIANCE`, `ARRAY_CORRELATION`, `ARRAY_FIRST_N`, `ARRAY_LAST_N`, `ARRAY_DEDUP_CONSECUTIVE`, `ARRAY_RLE`, `ARRAY_MEDIAN_ABS_DEV`, `ARRAY_IQR`, `ARRAY_GEOMETRIC_MEAN`, `ARRAY_HARMONIC_MEAN`, `ARRAY_ELEMENT_WISE_ADD`, `ARRAY_ELEMENT_WISE_MULTIPLY`, `ARRAY_ELEMENT_WISE_SUBTRACT`, `ARRAY_ELEMENT_WISE_DIVIDE`, `ARRAY_ELEMENT_WISE_MOD`, `ARRAY_CONTAINS_ALL`, `ARRAY_CONTAINS_ANY`, `ARRAY_RANGE_COUNT`, `ARRAY_COUNT_IF`, `ARRAY_SUM_IF`, `ARRAY_AVG_IF`, `ARRAY_ELEMENT_WISE_MIN`, `ARRAY_ELEMENT_WISE_MAX`, `ARRAY_BINARY_SEARCH`, `ARRAY_LOWER_BOUND`, `ARRAY_TRIMMED_MEAN`, `ARRAY_WINSORIZE`, `ARRAY_CUMMIN`, `ARRAY_CUMMAX`, `ARRAY_ELEMENT_WISE_POW`, `ARRAY_MAP_SQRT`, `ARRAY_MAP_LOG`, `ARRAY_MAP_EXP`, `ARRAY_WEIGHTED_SUM`, `ARRAY_FILTER_RANGE`, `ARRAY_MAP_CEIL`, `ARRAY_MAP_FLOOR`, `ARRAY_MAP_ROUND`, `ARRAY_MAP_SIGN`, `ARRAY_MAP_NEGATE`, `ARRAY_UPPER_BOUND`, `ARRAY_REDUCE_SUM`, `ARRAY_REDUCE_PRODUCT`, `ARRAY_SLIDING_MIN`, `ARRAY_SLIDING_MAX`, `ARRAY_MAP_RECIPROCAL`, `ARRAY_NORMALIZE_L1`, `ARRAY_DIFF_FORWARD`, `ARRAY_DIFF_BACKWARD`, `ARRAY_PREFIX_SUM`, `ARRAY_SUFFIX_SUM`, `ARRAY_UNIQUE_SORTED`, `ARRAY_MERGE_SORTED`, `ARRAY_LAG`, `ARRAY_LEAD`, `ARRAY_PAIRWISE_MAX`, `ARRAY_PAIRWISE_MIN`, `ARRAY_ROLLING_SUM`, `ARRAY_ROLLING_COUNT`, `ARRAY_FLATTEN_DEEP`, `ARRAY_REPEAT_EACH`, `ARRAY_INDEX_OF_MAX`, `ARRAY_INDEX_OF_MIN`, `ARRAY_ROTATE_LEFT`, `ARRAY_ROTATE_RIGHT`, `ARRAY_SPAN`, `ARRAY_TAKE_LAST`, `ARRAY_DROP_LAST`, `ARRAY_SWAP`, `ARRAY_ENUMERATE`, `ARRAY_ZIP_INDEX`, `ARRAY_FIND_INDEX`, `ARRAY_COUNT_VALUE`, `ARRAY_TAKE_FIRST`, `ARRAY_DROP_FIRST`, `ARRAY_REPLACE_AT`, `ARRAY_INSERT_AT`, `ARRAY_REMOVE_AT`, `ARRAY_SPLICE`, `ARRAY_ONLY_POSITIVE`, `ARRAY_ONLY_NEGATIVE`, `ARRAY_FILL_VALUE`, `ARRAY_RANGE_FILL`, `ARRAY_TO_MAP`, `ARRAY_FROM_PAIRS`, `ARRAY_FREQUENCIES`, `ARRAY_MODE_ALL`, `ARRAY_NTHS`, `ARRAY_EVERY_NTH`, `ARRAY_SCAN_MIN`, `ARRAY_SCAN_MAX`, `ARRAY_WEIGHTED_MEDIAN`, `ARRAY_TRIMMED_VARIANCE`, `ARRAY_POWER_SET`, `ARRAY_COMBINATIONS`, `ARRAY_PERMUTATIONS`, `ARRAY_CARTESIAN_PRODUCT`, `ARRAY_TRANSPOSE`, `ARRAY_DIAGONAL`, `ARRAY_MATRIX_MULTIPLY`, `ARRAY_TRACE`, `ARRAY_DETERMINANT`, `ARRAY_IDENTITY`, `ARRAY_INVERSE`, `ARRAY_SCALAR_ADD`, `ARRAY_SCALAR_MULTIPLY`, `ARRAY_SCALAR_SUBTRACT`, `ARRAY_SCALAR_DIVIDE`, `ARRAY_FROBENIUS_NORM`, `ARRAY_OUTER_PRODUCT`, `ARRAY_KRONECKER_PRODUCT`, `ARRAY_RESHAPE`, `ARRAY_MATRIX_RANK`, `ARRAY_MATRIX_ADD`, `ARRAY_MATRIX_SUBTRACT`, `ARRAY_MATRIX_POWER`, `ARRAY_MATRIX_SCALE`, `ARRAY_MATRIX_HADAMARD`, `ARRAY_MATRIX_TRACE_NORM`, `ARRAY_MATRIX_DIAGONAL`, `ARRAY_MATRIX_ANTIDIAGONAL`, `ARRAY_MATRIX_ROW`, `ARRAY_MATRIX_COL`, `ARRAY_MATRIX_IDENTITY`, `ARRAY_MATRIX_ZEROS`, `ARRAY_MATRIX_ONES`, `ARRAY_MATRIX_FLATTEN_ROW`, `ARRAY_MATRIX_FILL`, `ARRAY_MATRIX_FROM_DIAGONAL`, `ARRAY_MATRIX_RESHAPE_COLS`, `ARRAY_MATRIX_MINOR`, `ARRAY_MATRIX_SUBMATRIX`, `ARRAY_MATRIX_SET_ELEMENT`, `ARRAY_MATRIX_COLUMN_SUM`, `ARRAY_MATRIX_ROW_SUM`, `ARRAY_MATRIX_COLUMN_MAX`, `ARRAY_MATRIX_ROW_MAX`, `ARRAY_MATRIX_COLUMN_MIN`, `ARRAY_MATRIX_ROW_MIN`, `ARRAY_MATRIX_COLUMN_AVG`, `ARRAY_MATRIX_ROW_AVG`, `ARRAY_MATRIX_COLUMN_NORM`, `ARRAY_MATRIX_ROW_NORM`, `ARRAY_MATRIX_DIAGONAL_SUM`, `ARRAY_MATRIX_ANTI_DIAGONAL`, `ARRAY_MATRIX_COLUMN_PRODUCT`, `ARRAY_MATRIX_ROW_PRODUCT`, `ARRAY_MATRIX_COLUMN_VARIANCE`, `ARRAY_MATRIX_ROW_VARIANCE`, `ARRAY_MATRIX_COLUMN_STDDEV`, `ARRAY_MATRIX_ROW_STDDEV`, `ARRAY_MATRIX_COLUMN_MEDIAN`, `ARRAY_MATRIX_ROW_MEDIAN`, `ARRAY_MATRIX_COLUMN_RANGE`, `ARRAY_MATRIX_ROW_RANGE`, `ARRAY_MATRIX_COLUMN_ARGMAX`, `ARRAY_MATRIX_ROW_ARGMAX`, `ARRAY_MATRIX_COLUMN_ARGMIN`, `ARRAY_MATRIX_ROW_ARGMIN`, `ARRAY_MATRIX_COLUMN_CUMSUM`, `ARRAY_MATRIX_ROW_CUMSUM`, `ARRAY_MATRIX_COLUMN_NORMALIZE`, `ARRAY_MATRIX_ROW_NORMALIZE`, `ARRAY_MATRIX_TRANSPOSE`, `ARRAY_MATRIX_COLUMN_DIFF`, `ARRAY_MATRIX_ROW_DIFF`, `ARRAY_MATRIX_COLUMN_MOVING_AVG`, `ARRAY_MATRIX_ROW_MOVING_AVG`, `ARRAY_MATRIX_COLUMN_RANK`, `ARRAY_MATRIX_ROW_RANK`, `ARRAY_MATRIX_COLUMN_CUM_PRODUCT`, `ARRAY_MATRIX_ROW_CUM_PRODUCT`, `ARRAY_MATRIX_COLUMN_VARIANCE_NORM`, `ARRAY_MATRIX_ROW_VARIANCE_NORM`, `ARRAY_MATRIX_COLUMN_MIN_MAX`, `ARRAY_MATRIX_ROW_MIN_MAX`, `ARRAY_MATRIX_COLUMN_Z_SCORE`, `ARRAY_MATRIX_ROW_Z_SCORE`, `ARRAY_MATRIX_COLUMN_DENSE_RANK`, `ARRAY_MATRIX_ROW_DENSE_RANK`, `ARRAY_MATRIX_COLUMN_PERCENTILE`, `ARRAY_MATRIX_ROW_PERCENTILE`, `ARRAY_MATRIX_COLUMN_NTH_LARGEST`, `ARRAY_MATRIX_ROW_NTH_LARGEST`, `ARRAY_MATRIX_COLUMN_SOFTMAX`, `ARRAY_MATRIX_ROW_SOFTMAX`, `ARRAY_MATRIX_COLUMN_L1_NORM`, `ARRAY_MATRIX_ROW_L1_NORM`, `ARRAY_MATRIX_COLUMN_L2_NORM`, `ARRAY_MATRIX_ROW_L2_NORM`, `ARRAY_MATRIX_COLUMN_INF_NORM`, `ARRAY_MATRIX_ROW_INF_NORM`, `ARRAY_MATRIX_COLUMN_COVARIANCE`, `ARRAY_MATRIX_ROW_COVARIANCE`, `ARRAY_MATRIX_COLUMN_CORRELATION`, `ARRAY_MATRIX_ROW_CORRELATION`, `ARRAY_MATRIX_COLUMN_SKEWNESS`, `ARRAY_MATRIX_ROW_SKEWNESS`, `ARRAY_MATRIX_COLUMN_KURTOSIS`, `ARRAY_MATRIX_ROW_KURTOSIS`, `ARRAY_MATRIX_COLUMN_ENTROPY`, `ARRAY_MATRIX_ROW_ENTROPY`, `ARRAY_MATRIX_COLUMN_GEOMETRIC_MEAN`, `ARRAY_MATRIX_ROW_GEOMETRIC_MEAN`, `ARRAY_MATRIX_COLUMN_HARMONIC_MEAN`, `ARRAY_MATRIX_ROW_HARMONIC_MEAN`, `ARRAY_MATRIX_COLUMN_RMS`, `ARRAY_MATRIX_ROW_RMS`, `ARRAY_MATRIX_COLUMN_TRIMMED_MEAN`, `ARRAY_MATRIX_ROW_TRIMMED_MEAN`, `ARRAY_MATRIX_COLUMN_WINSORIZED_MEAN`, `ARRAY_MATRIX_ROW_WINSORIZED_MEAN`, `ARRAY_MATRIX_COLUMN_COEFF_VAR`, `ARRAY_MATRIX_ROW_COEFF_VAR`, `ARRAY_MATRIX_COLUMN_MIDRANGE`, `ARRAY_MATRIX_ROW_MIDRANGE`, `ARRAY_MATRIX_COLUMN_MODE`, `ARRAY_MATRIX_ROW_MODE`, `ARRAY_MATRIX_COLUMN_IQR`, `ARRAY_MATRIX_ROW_IQR`, `ARRAY_MATRIX_COLUMN_ABS_SUM`, `ARRAY_MATRIX_ROW_ABS_SUM`, `ARRAY_MATRIX_COLUMN_SUM_SQUARES`, `ARRAY_MATRIX_ROW_SUM_SQUARES`, `ARRAY_MATRIX_COLUMN_MEAN_ABS_DEV`, `ARRAY_MATRIX_ROW_MEAN_ABS_DEV`, `ARRAY_MATRIX_COLUMN_LOG_SUM`, `ARRAY_MATRIX_ROW_LOG_SUM`, `ARRAY_MATRIX_COLUMN_ABS_MEAN`, `ARRAY_MATRIX_ROW_ABS_MEAN`, `ARRAY_MATRIX_COLUMN_LOG_MEAN`, `ARRAY_MATRIX_ROW_LOG_MEAN`, `ARRAY_MATRIX_COLUMN_ABS_DEV`, `ARRAY_MATRIX_ROW_ABS_DEV`, `ARRAY_MATRIX_COLUMN_LOG_DEV`, `ARRAY_MATRIX_ROW_LOG_DEV`, `ARRAY_MATRIX_COLUMN_RMS_NORM`, `ARRAY_MATRIX_ROW_RMS_NORM`, `ARRAY_MATRIX_COLUMN_ABS_RANGE`, `ARRAY_MATRIX_ROW_ABS_RANGE`, `ARRAY_MATRIX_COLUMN_RMS_DEV`, `ARRAY_MATRIX_ROW_RMS_DEV`, `ARRAY_MATRIX_COLUMN_LOG_RANGE`, `ARRAY_MATRIX_ROW_ABS_NORM`, `ARRAY_MATRIX_COLUMN_RMS_RANGE`, `ARRAY_MATRIX_ROW_LOG_NORM`, `ARRAY_MATRIX_COLUMN_ABS_NORM`, `ARRAY_MATRIX_ROW_RMS_RANGE`, `ARRAY_MATRIX_COLUMN_LOG_NORM`, `ARRAY_MATRIX_ROW_LOG_RANGE`, `ARRAY_MATRIX_COLUMN_RMS_DEV2`, `ARRAY_MATRIX_ROW_ABS_RANGE2`, `ARRAY_MATRIX_COLUMN_RMS_NORM2`, `ARRAY_MATRIX_ROW_LOG_MEAN2`, `ARRAY_MATRIX_COLUMN_ABS_RANGE2`, `ARRAY_MATRIX_ROW_RMS_MEAN2`, `ARRAY_MATRIX_COLUMN_LOG_RANGE2`, `ARRAY_MATRIX_ROW_ABS_MEAN2`, `ARRAY_MATRIX_COLUMN_RMS_RANGE2`, `ARRAY_MATRIX_ROW_LOG_DEV2`, `ARRAY_MATRIX_COLUMN_ABS_MEAN2`, `ARRAY_MATRIX_ROW_RMS_DEV2`, `ARRAY_MATRIX_COLUMN_LOG_MEAN2`, `ARRAY_MATRIX_ROW_ABS_DEV2`, `ARRAY_MATRIX_COLUMN_RMS_MEAN2`, `ARRAY_MATRIX_ROW_LOG_RANGE2`, `ARRAY_MATRIX_COLUMN_ABS_DEV2`, `ARRAY_MATRIX_ROW_RMS_RANGE2`, `ARRAY_MATRIX_COLUMN_LOG_DEV2`, `ARRAY_MATRIX_ROW_RMS_NORM2`, `ARRAY_MATRIX_COLUMN_ABS_NORM2`, `ARRAY_MATRIX_ROW_LOG_NORM2`, `ARRAY_MATRIX_COLUMN_LOG_NORM2`, `ARRAY_MATRIX_ROW_ABS_NORM2`, `ARRAY_MATRIX_COLUMN_ABS_LOG2`, `ARRAY_MATRIX_ROW_RMS_LOG2`, `ARRAY_MATRIX_COLUMN_ABS_DEV3`, `ARRAY_MATRIX_ROW_ABS_LOG2`, `ARRAY_MATRIX_COLUMN_RMS_LOG2`, `ARRAY_MATRIX_ROW_LOG_DEV3`, `ARRAY_MATRIX_COLUMN_ABS_RANGE3`, `ARRAY_MATRIX_ROW_RMS_DEV3`, `ARRAY_MATRIX_COLUMN_LOG_RANGE3`, `ARRAY_MATRIX_ROW_ABS_DEV3`, `ARRAY_MATRIX_COLUMN_RMS_RANGE3`, `ARRAY_MATRIX_ROW_LOG_RANGE3`, `ARRAY_MATRIX_COLUMN_RMS_DEV3`, `ARRAY_MATRIX_ROW_RMS_RANGE3`, `ARRAY_MATRIX_COLUMN_LOG_DEV3`, `ARRAY_MATRIX_ROW_ABS_RANGE3`, `ARRAY_MATRIX_COLUMN_RMS_LOG3`, `ARRAY_MATRIX_ROW_RMS_DEV4`, `ARRAY_MATRIX_COLUMN_LOG_RANGE4`, `ARRAY_MATRIX_ROW_ABS_DEV4`, `ARRAY_MATRIX_COLUMN_RMS_RANGE4`, `ARRAY_MATRIX_ROW_LOG_DEV4`, `ARRAY_MATRIX_COLUMN_ABS_DEV4`, `ARRAY_MATRIX_ROW_RMS_LOG4`, `ARRAY_MATRIX_COLUMN_LOG_DEV4`, `ARRAY_MATRIX_ROW_ABS_LOG4`, `ARRAY_MATRIX_COLUMN_RMS_LOG4`, `ARRAY_MATRIX_ROW_LOG_LOG4`, `ARRAY_MATRIX_COLUMN_ABS_LOG4`, `ARRAY_MATRIX_ROW_ABS_RANGE5`, `ARRAY_MATRIX_COLUMN_LOG_LOG4`, `ARRAY_MATRIX_ROW_RMS_RANGE5`, `ARRAY_MATRIX_COLUMN_ABS_RANGE5`, `ARRAY_MATRIX_ROW_LOG_RANGE5`, `ARRAY_MATRIX_COLUMN_RMS_RANGE5`, `ARRAY_MATRIX_ROW_ABS_DEV5`, `ARRAY_MATRIX_COLUMN_LOG_RANGE5`, `ARRAY_MATRIX_ROW_RMS_DEV5`, `ARRAY_MATRIX_COLUMN_ABS_DEV5`, `ARRAY_MATRIX_ROW_LOG_DEV5`, `ARRAY_MATRIX_COLUMN_RMS_DEV5`, `ARRAY_MATRIX_ROW_LOG_LOG5`, `ARRAY_MATRIX_COLUMN_ABS_LOG5`, `ARRAY_MATRIX_ROW_RMS_LOG5`, `ARRAY_MATRIX_COLUMN_LOG_LOG5`, `ARRAY_MATRIX_ROW_ABS_LOG5`, `ARRAY_MATRIX_COLUMN_RMS_LOG5`, `ARRAY_MATRIX_ROW_LOG_LOG6`, `ARRAY_MATRIX_COLUMN_ABS_LOG6`, `ARRAY_MATRIX_ROW_RMS_LOG6`, `ARRAY_MATRIX_COLUMN_LOG_LOG6`, `ARRAY_MATRIX_ROW_ABS_LOG6`, `ARRAY_MATRIX_COLUMN_RMS_LOG6`, `ARRAY_MATRIX_ROW_LOG_RANGE6`, `ARRAY_MATRIX_COLUMN_ABS_DEV6`, `ARRAY_MATRIX_ROW_RMS_RANGE6`, `ARRAY_MATRIX_COLUMN_LOG_DEV6`, `ARRAY_MATRIX_ROW_ABS_RANGE6`, `ARRAY_MATRIX_COLUMN_RMS_DEV6`, `ARRAY_MATRIX_ROW_RMS_ABS6`, `ARRAY_MATRIX_COLUMN_LOG_RANGE6`, `ARRAY_MATRIX_ROW_ABS_ABS6`, `ARRAY_MATRIX_COLUMN_RMS_RANGE6`, `ARRAY_MATRIX_ROW_LOG_ABS6`, `ARRAY_MATRIX_COLUMN_ABS_RANGE6`, `ARRAY_MATRIX_ROW_LOG_DEV6`, `ARRAY_MATRIX_COLUMN_ABS_ABS6`, `ARRAY_MATRIX_ROW_RMS_DEV6`, `ARRAY_MATRIX_COLUMN_ABS_LOG7`, `ARRAY_MATRIX_ROW_ABS_LOG7`, `ARRAY_MATRIX_COLUMN_RMS_RANGE7`, `ARRAY_MATRIX_ROW_LOG_RANGE7`, `ARRAY_MATRIX_COLUMN_RMS_DEV7`, `ARRAY_MATRIX_ROW_RMS_LOG7`, `ARRAY_MATRIX_COLUMN_LOG_RANGE7`, `ARRAY_MATRIX_ROW_ABS_RANGE7`, `ARRAY_MATRIX_COLUMN_RMS_LOG7`, `ARRAY_MATRIX_ROW_LOG_DEV7`, `ARRAY_MATRIX_COLUMN_ABS_RANGE7`, `ARRAY_MATRIX_ROW_RMS_DEV7`, `ARRAY_MATRIX_COLUMN_LOG_DEV7`, `ARRAY_MATRIX_ROW_ABS_DEV7`, `ARRAY_MATRIX_COLUMN_ABS_DEV7`, `ARRAY_MATRIX_ROW_LOG_RANGE8`, `ARRAY_MATRIX_COLUMN_RMS_RANGE8`, `ARRAY_MATRIX_ROW_ABS_RANGE8`, `ARRAY_MATRIX_COLUMN_LOG_RANGE8`, `ARRAY_MATRIX_ROW_RMS_DEV8`, `ARRAY_MATRIX_COLUMN_ABS_DEV8`, `ARRAY_MATRIX_ROW_LOG_DEV8`, `ARRAY_MATRIX_COLUMN_RMS_DEV8`, `ARRAY_MATRIX_ROW_ABS_DEV8`, `ARRAY_MATRIX_COLUMN_LOG_DEV8`, `ARRAY_MATRIX_ROW_RMS_RANGE9`, `ARRAY_MATRIX_COLUMN_ABS_RANGE9`, `ARRAY_MATRIX_ROW_LOG_RANGE9`, `ARRAY_MATRIX_COLUMN_RMS_RANGE9`, `ARRAY_MATRIX_ROW_ABS_RANGE9`, `ARRAY_MATRIX_COLUMN_LOG_RANGE9`, `ARRAY_MATRIX_ROW_RMS_DEV9`, `ARRAY_MATRIX_COLUMN_ABS_DEV9`, `ARRAY_MATRIX_ROW_LOG_DEV9`, `ARRAY_MATRIX_COLUMN_RMS_DEV9`, `ARRAY_MATRIX_ROW_ABS_DEV9`, `ARRAY_MATRIX_COLUMN_LOG_DEV9`, `ARRAY_MATRIX_ROW_RMS_RANGE10`, `ARRAY_MATRIX_COLUMN_ABS_RANGE10`, `ARRAY_MATRIX_ROW_LOG_RANGE10`, `ARRAY_MATRIX_COLUMN_RMS_RANGE10`, `ARRAY_MATRIX_ROW_ABS_RANGE10`, `ARRAY_MATRIX_COLUMN_LOG_RANGE10`, `ARRAY_MATRIX_ROW_RMS_DEV10`, `ARRAY_MATRIX_COLUMN_ABS_DEV10`, `ARRAY_MATRIX_ROW_LOG_DEV10`, `ARRAY_MATRIX_COLUMN_RMS_DEV10`, `ARRAY_MATRIX_ROW_ABS_DEV10`, `ARRAY_MATRIX_COLUMN_LOG_DEV10`, `ARRAY_MATRIX_ROW_RMS_RANGE11`, `ARRAY_MATRIX_COLUMN_ABS_RANGE11`, `ARRAY_MATRIX_ROW_LOG_RANGE11`, `ARRAY_MATRIX_COLUMN_RMS_RANGE11`, `ARRAY_MATRIX_ROW_ABS_RANGE11`, `ARRAY_MATRIX_COLUMN_LOG_RANGE11`, `ARRAY_MATRIX_ROW_RMS_DEV11`, `ARRAY_MATRIX_COLUMN_ABS_DEV11`, `ARRAY_MATRIX_ROW_LOG_DEV11`, `ARRAY_MATRIX_COLUMN_RMS_DEV11`, `ARRAY_MATRIX_ROW_ABS_DEV11`, `ARRAY_MATRIX_COLUMN_LOG_DEV11`, `ARRAY_MATRIX_ROW_RMS_RANGE12`, `ARRAY_MATRIX_COLUMN_ABS_RANGE12`, `ARRAY_MATRIX_ROW_LOG_RANGE12`, `ARRAY_MATRIX_COLUMN_RMS_RANGE12`, `ARRAY_MATRIX_ROW_ABS_RANGE12`, `ARRAY_MATRIX_COLUMN_LOG_RANGE12`, `ARRAY_MATRIX_ROW_RMS_DEV12`, `ARRAY_MATRIX_COLUMN_ABS_DEV12`, `ARRAY_MATRIX_ROW_LOG_DEV12`, `ARRAY_MATRIX_COLUMN_RMS_DEV12`, `ARRAY_MATRIX_ROW_ABS_DEV12`, `ARRAY_MATRIX_COLUMN_LOG_DEV12`, `ARRAY_MATRIX_ROW_RMS_RANGE13`, `ARRAY_MATRIX_COLUMN_ABS_RANGE13`, `ARRAY_MATRIX_ROW_LOG_RANGE13`, `ARRAY_MATRIX_COLUMN_RMS_RANGE13`, `ARRAY_MATRIX_ROW_ABS_RANGE13`, `ARRAY_MATRIX_COLUMN_LOG_RANGE13`, `ARRAY_MATRIX_ROW_RMS_DEV13`, `ARRAY_MATRIX_COLUMN_ABS_DEV13`, `ARRAY_MATRIX_ROW_LOG_DEV13`, `ARRAY_MATRIX_COLUMN_RMS_DEV13`, `ARRAY_MATRIX_ROW_ABS_DEV13`, `ARRAY_MATRIX_COLUMN_LOG_DEV13`, `ARRAY_MATRIX_ROW_RMS_RANGE14`, `ARRAY_MATRIX_COLUMN_ABS_RANGE14`, `ARRAY_MATRIX_ROW_LOG_RANGE14`, `ARRAY_MATRIX_COLUMN_RMS_RANGE14`, `ARRAY_MATRIX_ROW_ABS_RANGE14`, `ARRAY_MATRIX_COLUMN_LOG_RANGE14`, `ARRAY_MATRIX_ROW_RMS_DEV14`, `ARRAY_MATRIX_COLUMN_ABS_DEV14`, `ARRAY_MATRIX_ROW_LOG_DEV14`, `ARRAY_MATRIX_COLUMN_RMS_DEV14`, `ARRAY_MATRIX_ROW_ABS_DEV14`, `ARRAY_MATRIX_COLUMN_LOG_DEV14`, `ARRAY_MATRIX_ROW_RMS_DEV15`, `ARRAY_MATRIX_COLUMN_ABS_DEV15`, `ARRAY_MATRIX_ROW_LOG_DEV15`, `ARRAY_MATRIX_COLUMN_RMS_DEV15`, `ARRAY_MATRIX_ROW_ABS_RANGE15`, `ARRAY_MATRIX_COLUMN_LOG_RANGE15`, `ARRAY_MATRIX_ROW_RMS_RANGE15`, `ARRAY_MATRIX_COLUMN_ABS_RANGE15`, `ARRAY_MATRIX_ROW_LOG_RANGE15`, `ARRAY_MATRIX_COLUMN_RMS_RANGE15`, `ARRAY_MATRIX_ROW_ABS_DEV15`, `ARRAY_MATRIX_COLUMN_LOG_DEV15`, `ARRAY_MATRIX_ROW_LOG_MEAN15`, `ARRAY_MATRIX_COLUMN_RMS_MEAN15`, `ARRAY_MATRIX_ROW_ABS_MEAN15`, `ARRAY_MATRIX_COLUMN_LOG_MEAN15`, `ARRAY_MATRIX_ROW_RMS_MEAN15`, `ARRAY_MATRIX_COLUMN_ABS_MEAN15`, `ARRAY_MATRIX_ROW_ABS_SUM15`, `ARRAY_MATRIX_COLUMN_LOG_SUM15`, `ARRAY_MATRIX_ROW_RMS_SUM15`, `ARRAY_MATRIX_COLUMN_ABS_SUM15`, `ARRAY_MATRIX_ROW_LOG_SUM15`, `ARRAY_MATRIX_COLUMN_RMS_SUM15`, `ARRAY_MATRIX_ROW_ABS_PROD15`, `ARRAY_MATRIX_COLUMN_LOG_PROD15`, `ARRAY_MATRIX_ROW_RMS_PROD15`, `ARRAY_MATRIX_COLUMN_ABS_PROD15`, `ARRAY_MATRIX_ROW_LOG_PROD15`, `ARRAY_MATRIX_COLUMN_RMS_PROD15`, `ARRAY_MATRIX_ROW_ABS_PROD16`, `ARRAY_MATRIX_COLUMN_LOG_PROD16`, `ARRAY_MATRIX_ROW_RMS_PROD16`, `ARRAY_MATRIX_COLUMN_ABS_PROD16`, `ARRAY_MATRIX_ROW_LOG_PROD16`, `ARRAY_MATRIX_COLUMN_RMS_PROD16`, `ARRAY_MATRIX_ROW_ABS_RANGE16`, `ARRAY_MATRIX_COLUMN_LOG_RANGE16`, `ARRAY_MATRIX_ROW_RMS_DEV16`, `ARRAY_MATRIX_COLUMN_ABS_RANGE16`, `ARRAY_MATRIX_ROW_LOG_RANGE16`, `ARRAY_MATRIX_COLUMN_RMS_DEV16`, `ARRAY_MATRIX_ROW_ABS_DEV16`, `ARRAY_MATRIX_COLUMN_LOG_DEV16`, `ARRAY_MATRIX_ROW_RMS_RANGE16`, `ARRAY_MATRIX_COLUMN_ABS_DEV16`, `ARRAY_MATRIX_ROW_LOG_DEV16`, `ARRAY_MATRIX_COLUMN_RMS_RANGE16`, `ARRAY_MATRIX_ROW_ABS_DEV17`, `ARRAY_MATRIX_COLUMN_LOG_DEV17`, `ARRAY_MATRIX_ROW_RMS_RANGE17`, `ARRAY_MATRIX_COLUMN_ABS_DEV17`, `ARRAY_MATRIX_ROW_LOG_RANGE17`, `ARRAY_MATRIX_COLUMN_RMS_DEV17`, `ARRAY_MATRIX_ROW_ABS_RANGE17`, `ARRAY_MATRIX_COLUMN_LOG_RANGE17`, `ARRAY_MATRIX_ROW_RMS_DEV17`, `ARRAY_MATRIX_COLUMN_ABS_RANGE17`, `ARRAY_MATRIX_ROW_LOG_DEV17`, `ARRAY_MATRIX_COLUMN_RMS_RANGE17`, `ARRAY_MATRIX_ROW_ABS_RANGE18`, `ARRAY_MATRIX_COLUMN_LOG_RANGE18`, `ARRAY_MATRIX_ROW_LOG_DEV18`, `ARRAY_MATRIX_COLUMN_ABS_DEV18`, `ARRAY_MATRIX_ROW_RMS_DEV18`, `ARRAY_MATRIX_COLUMN_ABS_RANGE18`, `ARRAY_MATRIX_ROW_LOG_RANGE18`, `ARRAY_MATRIX_COLUMN_RMS_DEV18`, `CARDINALITY`; `||` operator for array concat), `OVERLAY`, `REGEXP_REPLACE`, `REGEXP_MATCH`, `REGEXP_COUNT`, `STARTS_WITH`, `ENDS_WITH`, `MD5`, `ENCODE`/`DECODE` (hex/base64), `TO_HEX`, `SUBSTR`, `REGEXP_SUBSTR`, `REGEXP_SPLIT_TO_ARRAY`, `REGEXP_INSTR`, `REGEXP_LIKE`, `QUOTE_LITERAL`, `QUOTE_IDENT`, `QUOTE_NULLABLE`, `PG_TYPEOF`, `TO_NUMBER`, `RANDOM`, `GEN_RANDOM_UUID`, `FORMAT`, `BIT_LENGTH`, `OCTET_LENGTH`, `REGEXP_INSTR`, `SHA256`, `SUBSTR_COUNT`, `NULLS`, `NUM_NULLS`, date/time functions (`NOW`, `AGE`, `MAKE_DATE`, `MAKE_TIMESTAMP`, `TO_TIMESTAMP`, `CLOCK_TIMESTAMP`, `STATEMENT_TIMESTAMP`, `TIMEOFDAY`, `TO_DATE`, `DATE_ADD`, `DATE_SUBTRACT`, `DATE_DIFF`, `EPOCH_FROM_TIMESTAMP`, `EXTRACT`, `DATE_TRUNC`, `DATE_PART`, `TO_CHAR`), window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`, `LAG`, `LEAD`, `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`, `PERCENT_RANK`, `CUME_DIST`, `SUM`/`COUNT`/`AVG`/`MIN`/`MAX` `OVER`), derived tables (`FROM (SELECT ...) AS alias`, including in JOINs), typed string literals (`TIMESTAMP '...'`), `CAST` to `TIMESTAMP` with string parsing, implicit type coercion (`INT`↔`BIGINT`↔`FLOAT8` in comparisons and arithmetic) |
+| **Types** | `INT`, `SMALLINT`, `BIGINT`, `TEXT`, `BOOL`, `FLOAT8`/`NUMERIC`/`DECIMAL`/`REAL`, `TIMESTAMP`, `JSONB` (literals, `->`, `->>`, `#>`, `#>>`, `@>`, `?`, `jsonb_extract_path`, `jsonb_typeof`, `jsonb_array_length`, `jsonb_each`, `jsonb_object_keys`, `jsonb_set`, `jsonb_build_object`, `jsonb_build_array`, `jsonb_strip_nulls`, `jsonb_pretty`, `jsonb_agg`), `ARRAY` (column type `INT[]`/`TEXT[]`, literals `ARRAY[...]`, subscript `arr[i]`, `ARRAY_AGG`); `GENERATE_SERIES(start, stop [, step])` table-valued function |
+| **Transactions** | `BEGIN`, `COMMIT`, `ROLLBACK`; Read Committed isolation |
+| **Storage** | In-memory row store; hash index on PK; BTreeMap secondary index; `CREATE INDEX` with backfill |
+| **Persistence** | WAL (segmented 64MB, group commit, purge); crash recovery |
+| **Distribution** | Hash sharding on PK; WAL-shipping replication over gRPC (`ReplicationTransport`, `WalChunk`); single-shard fast-path + cross-shard 2PC slow-path |
+| **Observability** | Prometheus metrics endpoint; structured logging; basic trace IDs |
+| **Admin** | Health check endpoint; node list; shard map query |
+
+### 3.2 Not Supported (M1)
+
+- Logical replication, CDC
+- Online schema change
+- Multi-tenancy
+- Automatic rebalancing (manual only)
+- Custom types (beyond JSONB)
+
+---
+
+## 4. Open-Source Reuse Matrix
+
+| Module | Candidate | License | Why | Risk | Adaptation Strategy |
+|--------|-----------|---------|-----|------|-------------------|
+| **PG Wire** | `pgwire` 0.25+ | MIT | Full PG message codec, auth, TLS-ready | API churn | Wrap in `PgCodec` trait; if replaced, only adapter changes |
+| **SQL Parser** | `sqlparser-rs` 0.50+ | Apache-2.0 | Battle-tested PG dialect, active community | Missing some PG syntax | Use as-is via `Parser::parse_sql(PostgreSqlDialect)`; extend AST for custom needs |
+| **Raft** | `openraft` 0.10+ | MIT | Pure-logic Raft, no runtime coupling, async-native | Complex generics | **Production path** via `role = raft_member`. In-process router for tests; gRPC transport (`GrpcNetworkFactory`) for multi-node clusters. |
+| **Async Runtime** | `tokio` 1.x | MIT | De-facto standard; io_uring via tokio-uring later | Lock-in | All async code uses `tokio`; sync boundaries via `spawn_blocking` |
+| **RPC** | `tonic` (gRPC) | MIT | Mature, codegen, streaming, HTTP/2 | Overhead for internal msgs | Define `Transport` trait; MVP uses tonic; can swap to custom TCP later |
+| **Serialization** | `prost` + `bincode` | Apache-2.0 / MIT | Protobuf for RPC; bincode for internal fast serde | — | `Codec` trait abstracts serialization |
+| **Metrics** | `metrics` + `metrics-exporter-prometheus` | MIT | Lightweight, Prometheus-native | — | Use `metrics` macros directly; exporter is swappable |
+| **Tracing** | `tracing` + `tracing-subscriber` + `tracing-opentelemetry` | MIT | Standard Rust tracing ecosystem | — | `tracing` macros everywhere; subscriber configured at startup |
+| **Concurrent structures** | `crossbeam` (epoch GC, queues) + `dashmap` | MIT / MIT | Production-proven concurrent data structures | — | Wrap in storage-internal types |
+| **Memory alloc** | `tikv-jemallocator` | MIT | Jemalloc for predictable perf, less fragmentation | Platform | Feature-gated; fallback to system allocator |
+| **BTree index** | `crossbeam-skiplist` or custom | MIT | Concurrent ordered index | Limited range scan perf | Behind `Index` trait; can swap to ART/Bw-Tree later |
+| **WAL** | Custom (thin) | — | Simple append-only log; no need for complex lib | Must get fsync right | `WalWriter` trait; could swap to `wal` crate or io_uring backend |
+| **Config** | `serde` + `toml` | MIT | Standard config parsing | — | — |
+| **Error** | `thiserror` (libs) + `anyhow` (bin) | MIT | Typed errors in libs, ergonomic in binary | — | `FalconError` enum with `thiserror` |
+| **CLI** | `clap` | MIT | Arg parsing for server binary | — | — |
+
+**Fork policy**: No forks. All dependencies used as published crates. Abstraction traits at every boundary ensure future replacement without forking.
+
+---
+
+## 5. Transaction & Consistency Design
+
+### 5.1 Design Alternatives Considered (historical, NOT implemented)
+
+> The following two routes were evaluated during the design phase but **neither is implemented**.
+> They are retained here for architectural context only.
+
+- **Route A (Per-Shard Raft + 2PC)**: Each shard as a Raft group → linearizable writes, cross-shard 2PC. Rejected: 2PC latency overhead, complex coordinator failure handling.
+- **Route B (Per-Shard Raft + Txn Coordinator)**: Raft per shard, coordinator with timestamps and parallel prepare. Rejected: significant engineering cost with marginal benefit over WAL-shipping for current deployment model.
+
+### 5.2 Implemented: Fast-Path + Slow-Path with OCC
+
+- **LocalTxn (fast-path)**: single-shard transactions commit with OCC validation under Snapshot Isolation. No 2PC overhead. `TxnContext.txn_path = Fast`.
+- **GlobalTxn (slow-path)**: cross-shard transactions use XA-2PC (prepare → commit). `TxnContext.txn_path = Slow`.
+- **Hard invariant enforcement**: `TxnContext.validate_commit_invariants()` returns `InvariantViolation` error (not just debug_assert). LocalTxn must have 1 shard + fast-path; GlobalTxn must not use fast-path.
+- **Unified commit entry**: `StorageEngine::commit_txn(txn_id, commit_ts, txn_type)` is the only public API. Raw `commit_txn_local`/`commit_txn_global` are `pub(crate)`.
+- **Isolation**: Read Committed (default) or Snapshot Isolation (configurable). OCC read-set validation at commit time under SI.
+- **Unique constraint enforcement**: commit-time re-validation with atomic rollback on violation.
+- **Automatic classification**: planner routing hints determine Local vs Global; `observe_involved_shards()` upgrades Local→Global if needed.
+- **Cross-shard reads**: scatter-gather on shard leaders with configurable failure policy (Strict or BestEffort) and memory limits.
+
+### 5.4 MVCC Garbage Collection
+
+- **Safepoint**: `gc_safepoint = min(min_active_ts, replica_safe_ts) - 1`
+- **WAL-aware**: never reclaims uncommitted (commit_ts==0) or aborted (commit_ts==MAX) versions
+- **Replication-safe**: respects replica applied timestamps
+- **Lock-free per key**: per-chain pruning via DashMap iteration, no global lock, no stop-the-world
+- **Background runner**: `GcRunner` thread with configurable interval and batch size
+- **Observability**: `SHOW falcon.gc_stats` exposes safepoint, reclaimed versions/bytes, chain stats
+
+### 5.5 Replication — WAL Shipping over gRPC
+
+FalconDB uses **WAL-shipping replication** as its sole production replication mechanism.
+
+#### WAL Shipping (production path)
+
+```
+Primary ──WAL chunks──▶ Replica(s)
+         (gRPC stream, tonic, SubscribeWal RPC)
+```
+
+- **Transport**: `ReplicationTransport` trait → `InProcessTransport` (tests) → `GrpcTransport` (production, tonic gRPC)
+- **Wire**: `WalChunk` frames with `start_lsn`, `end_lsn`, CRC32 checksum; JSON-serialized `WalRecord` payloads
+- **Commit Ack (Scheme A)**: primary commits when WAL is durable (fsync). Replicas apply asynchronously.
+- **Quorum Ack (Scheme B)**: `SyncReplicationWaiter` blocks commit until N replicas report `applied_lsn ≥ commit_lsn`.
+- **Bootstrap**: new replica calls `GetCheckpoint` RPC → receives full `CheckpointData` snapshot → switches to WAL stream.
+- **Promote/failover**: 5-step fencing protocol (fence → catch-up → swap → unfence → update shard map).
+- **Status**: **fully implemented and tested** (9/9 `m2_multinode_e2e` tests pass).
+
+> **Replication options**: FalconDB supports two replication modes:
+> 1. **WAL-shipping** (`role = primary/replica`): Primary streams WAL records over gRPC; replicas apply them via `apply_wal_record_to_engine()`. Fully implemented.
+> 2. **Raft consensus** (`role = raft_member`): Writes are proposed through `openraft` → `RaftShardCoordinator` → `StorageEngine`. Automatic leader election and failover via `RaftFailoverWatcher`. Enabled in production as of this release.
+
+### 5.6 WAL Performance & Recovery
+
+#### Write Path Optimizations
+
+FalconDB's WAL uses `FILE_FLAG_WRITE_THROUGH` (FUA) on Windows and `fdatasync` on Linux, with a leader-follower group commit design:
+
+```
+Thread A (leader): append → swap double-buffer under inner lock → FUA write outside lock (~21µs)
+Thread B-N (followers): append → wait on leader's flush completion
+```
+
+- **Batch WAL writes**: `InsertRow` records deferred to commit time via `txn_wal_buf` DashMap + `append_multi`
+- **Cached flush fd**: `flush_fd_cache` avoids `DuplicateHandle` per flush call
+- **Double-buffer `flush_split`**: swap under inner lock (instant), FUA write outside lock
+- **Single-key commit fast path**: `commit_no_report` skips row cloning and unique constraint re-validation for autocommit single-row INSERTs
+- **Fixed-array `append_multi`**: common case (1 deferred + commit record) uses stack array instead of Vec
+
+#### Recovery Counter Advancement
+
+After WAL recovery, `TxnManager` counters must advance past recovered timestamps to ensure MVCC visibility:
+
+1. `StorageEngine::recover()` tracks `max_commit_ts` and `max_txn_id` from WAL `CommitTxn*` records
+2. Values stored in `recovered_max_ts: AtomicU64` and `recovered_max_txn_id: AtomicU64`
+3. `TxnManager::advance_counters_past(max_ts, max_txn_id)` called at startup — advances `ts_counter`, `local_ts_counter`, and `txn_counter` via `fetch_max`
+
+Without this, new queries would get `read_ts < recovered commit_ts`, making recovered rows invisible despite being in the memtable.
+
+#### Cancel Request Implementation
+
+PG cancel requests are fully implemented using `AtomicBool` polling (not `tokio::CancellationToken`):
+
+```
+Client ──CancelRequest(pid, secret)──▶ Server (new TCP conn)
+Server: cancel_registry[pid].cancelled.store(true)
+Query loop: polls cancelled every 50ms via tokio::select!
+```
+
+- **Why `AtomicBool` not `CancellationToken`**: the query executor runs in `spawn_blocking` (sync context); `CancellationToken` requires async context. The 50ms poll loop in the async wrapper achieves equivalent behaviour.
+- **Latency**: cancel takes effect within 50ms of the client request arriving.
+- **Extended query protocol**: cancel flag is checked at the start of each `Execute` message and after `spawn_blocking` returns.
+
+---
+
+## 6. Repository Structure & Core Traits
+
+```
+falcon/
+├── Cargo.toml                  (workspace root)
+├── README.md                   (user guide: build, cluster, config, promote, bench, metrics)
+├── ARCHITECTURE.md             (this file)
+├── .gitattributes              (LF enforcement, CRLF for .ps1/.bat)
+├── .github/workflows/ci.yml    (CI: check, test, clippy, fmt, failover-gate, windows)
+├── crates/
+│   ├── falcon_common/           (shared types, errors, config, datum, schema, RLS, RBAC)
+│   ├── falcon_storage/          (tables, LSM/RocksDB/redb engines, indexes, WAL, GC, TDE, USTM, PITR, CDC)
+│   ├── falcon_txn/              (transaction management, MVCC, OCC, stats)
+│   ├── falcon_sql_frontend/     (parser, binder, analyzer)
+│   ├── falcon_planner/          (logical + physical planning, routing hints)
+│   ├── falcon_executor/         (operator execution, expression evaluation, governor)
+│   ├── falcon_protocol_pg/      (PG wire protocol, SHOW command handling)
+│   ├── falcon_protocol_native/  (native binary protocol codec, compression, type mapping)
+│   ├── falcon_native_server/    (native protocol server, session, executor bridge, nonce)
+│   ├── falcon_raft/             (Raft consensus — production path via raft_member role)
+│   ├── falcon_proto/            (protobuf definitions + tonic codegen)
+│   ├── falcon_cluster/          (replication, failover, scatter/gather, epoch, migration, supervisor)
+│   ├── falcon_observability/    (metrics, tracing, logging setup)
+│   ├── falcon_segment_codec/    (Zstd/LZ4 segment compression, dictionary, decompression pool)
+│   ├── falcon_enterprise/       (control plane HA, enterprise security, ops automation)
+│   ├── falcon_server/           (main binary + integration tests)
+│   ├── falcon_cli/              (interactive CLI, cluster mgmt, import/export)
+│   └── falcon_bench/            (YCSB benchmark harness)
+├── clients/
+│   ├── falcondb-jdbc/           (Java JDBC driver — Maven project, HA failover)
+│   ├── falcondb-go/             (Go client — native protocol, HA seed list, pooling)
+│   ├── falcondb-python/         (Python client — DB-API 2.0, HA failover, pooling)
+│   └── falcondb-node/           (Node.js client — async, TLS, HA failover, TypeScript types)
+├── tools/
+│   └── native-proto-spec/       (golden test vectors for cross-language validation)
+├── bench_configs/              (frozen M1 benchmark configurations)
+├── docs/                       (roadmap, RPO/RTO, protocol compat, native protocol spec)
+├── examples/                   (primary.toml, replica.toml)
+└── scripts/                    (demo, failover, benchmark, CI gate, Windows setup)
+```
+
+### 6.1 Core Trait Sketches
+
+```rust
+// TableHandle — per-table engine dispatch (engine_tables: DashMap<TableId, TableHandle>)
+pub enum TableHandle {
+    Rowstore(Arc<MemTable>),           // fast-path: explicit DML/WAL/CDC branches
+    Lsm(Arc<LsmTable>),               // → dyn StorageTable
+    RocksDb(Arc<RocksDbTable>),        // → dyn StorageTable (feature-gated)
+    Redb(Arc<RedbTable>),             // → dyn StorageTable (feature-gated)
+    // ...
+}
+impl TableHandle {
+    fn as_storage_table(&self) -> Option<&dyn StorageTable>;
+    fn as_rowstore(&self) -> Option<&Arc<MemTable>>;
+}
+
+// StorageTable — core DML contract for disk-backed engines
+pub trait StorageTable: Send + Sync {
+    fn insert(&self, row: &OwnedRow, txn_id: TxnId) -> Result<PrimaryKey, StorageError>;
+    fn update(&self, pk: &PrimaryKey, new_row: &OwnedRow, txn_id: TxnId) -> Result<(), StorageError>;
+    fn delete(&self, pk: &PrimaryKey, txn_id: TxnId) -> Result<(), StorageError>;
+    fn get(&self, pk: &PrimaryKey, txn_id: TxnId, read_ts: Timestamp) -> Result<Option<OwnedRow>, StorageError>;
+    fn scan(&self, txn_id: TxnId, read_ts: Timestamp) -> Vec<(PrimaryKey, OwnedRow)>;
+    fn commit_key(&self, pk: &PrimaryKey, txn_id: TxnId, commit_ts: Timestamp) -> Result<(), StorageError>;
+    fn abort_key(&self, pk: &PrimaryKey, txn_id: TxnId);
+    // USTM prefetch (default no-op; LsmTable overrides)
+    fn prefetch_hint(&self, _table_id: TableId, _pk: &PrimaryKey, _ustm: &UstmEngine) {}
+    fn prefetch_evict(&self, _table_id: TableId, _pk: &PrimaryKey, _ustm: &UstmEngine) {}
+    fn scan_prefetch_hint(&self, _table_id: TableId, _row_count: usize, _ustm: &UstmEngine) {}
+}
+
+// TxnManager — transaction lifecycle
+#[async_trait]
+pub trait TxnManager: Send + Sync + 'static {
+    async fn begin(&self, isolation: IsolationLevel) -> Result<TxnHandle>;
+    async fn commit(&self, txn: TxnHandle) -> Result<()>;
+    async fn abort(&self, txn: TxnHandle) -> Result<()>;
+}
+
+// Consensus — pluggable consensus (stub only — NOT on production path)
+#[async_trait]
+pub trait Consensus: Send + Sync + 'static {
+    async fn propose(&self, shard: ShardId, entry: LogEntry) -> Result<()>;
+    async fn add_member(&self, shard: ShardId, node: NodeId) -> Result<()>;
+    async fn remove_member(&self, shard: ShardId, node: NodeId) -> Result<()>;
+}
+
+// Executor
+#[async_trait]
+pub trait Executor: Send + Sync + 'static {
+    async fn execute(&self, plan: PhysicalPlan, txn: &TxnHandle) -> Result<ExecutionResult>;
+}
+```
+
+### 6.2 Error Strategy
+
+- Library crates: `thiserror` enums (`StorageError`, `TxnError`, `ProtocolError`, etc.)
+- All roll up to `FalconError` in `common` via `From` impls
+- Binary (`main.rs`): `anyhow` for top-level wiring
+- PG error mapping: `FalconError → PgErrorResponse` (SQLSTATE codes)
+
+### 6.3 Async Strategy
+
+- Runtime: `tokio` multi-threaded
+- All I/O (network, WAL fsync) is async
+- CPU-bound work (parsing, planning): synchronous, wrapped in `spawn_blocking` only if measurably slow
+- Replication streaming: long-lived gRPC streams managed by `tokio` tasks
+
+---
+
+## 7. Performance Targets & Benchmarks
+
+### 7.1 MVP Targets (Single Node, In-Memory, No Replication)
+
+| Metric | Target |
+|--------|--------|
+| Point read (PK lookup) QPS | ≥ 200K |
+| Point read P50 / P99 | < 0.2ms / < 1ms |
+| Point write QPS | ≥ 100K |
+| Point write P50 / P99 | < 0.5ms / < 2ms |
+| Mixed (50/50 R/W) QPS | ≥ 120K |
+| Memory per 1M rows (8 cols, avg 100B) | < 500MB |
+
+### 7.2 Cluster Targets (3-Node, WAL-Replicated)
+
+| Metric | Target |
+|--------|--------|
+| Write QPS (single shard) | ≥ 50K |
+| Write P99 | < 5ms |
+| Linear scale factor (3→9 nodes, 3x shards) | ≥ 2.5x |
+
+### 7.3 v1.3 OLTP Benchmark Targets (Single Node, In-Memory)
+
+Measured via `cargo bench --bench bench_oltp_scenarios` (Criterion, fixed seed).
+
+| Scenario | Metric | Target |
+|----------|--------|--------|
+| Point Select | P50 latency | < 500 ns |
+| Point Select | P99 latency | < 2 µs |
+| Insert (empty table) | Throughput | > 500K TPS |
+| Update by PK (100K rows) | Throughput | > 300K TPS |
+| Short Transaction (3×update) | Throughput | > 150K TPS |
+| Batch Insert (1K rows/txn) | Row throughput | > 5M rows/s |
+| Hot Row Update (depth-1 chain) | Latency regression vs cold row | < 10% |
+
+### 7.4 Benchmark Plan
+
+- **YCSB**: Workloads A (50/50), B (95/5), C (100% read), F (read-modify-write) — MVP uses A+C
+- **OLTP 6-scenario suite**: point select, insert, update-by-PK, short-txn, batch-insert, hot-row — `bench_oltp_scenarios`
+- **TPC-C**: Deferred to P3 (requires JOIN)
+- **Custom micro-benchmarks**: PG protocol throughput, replication lag, WAL fsync latency
+
+### 7.5 Hotspot Handling
+
+- **Detection**: Per-shard QPS counter; alert if any shard > 3x average
+- **Hot Row Optimization**: `coalesce_hot_rows(watermark)` called by GC runner; keeps version chain depth-1 for rows with write frequency ≥ `HOT_ROW_THRESHOLD=8`
+- **Manual mitigation**: Shard split command; automatic rebalancing via `[rebalance]` config
+
+---
+
+## 8. Testing, Verification & Milestones
+
+### 8.1 Test Strategy
+
+| Level | Scope | Tools |
+|-------|-------|-------|
+| **Unit** | Parser, executor operators, MVCC visibility, GC chain, OCC validation | `#[test]` |
+| **Integration** | Full SQL pipeline: DDL, DML, joins, subqueries, aggregates, window fns | `falcon_server/tests/integration_test.rs` |
+| **Cluster** | Replication, failover, promote, scatter/gather, GC+replication combined | `falcon_cluster/src/tests.rs` |
+| **Handler** | SHOW commands (gc_stats, replication_stats, txn_stats, txn_history) | `falcon_protocol_pg/src/handler.rs` |
+| **Benchmark** | YCSB workloads, fast vs slow path, scale-out, failover impact | `falcon_bench` |
+| **Data integrity** | Crash-recovery, WAL replay, GC+promote combined correctness | Automated tests |
+
+### 8.2 Test Counts (4,380+ tests across 18 crates)
+
+| Crate | Tests | Coverage |
+|-------|-------|----------|
+| `falcon_cluster` | 1,050+ | Replication, failover, scatter/gather, GC, admission, cluster ops, circuit breaker, 2PC, token bucket, epoch, leader lease, migration, throttle, supervisor, control plane, enterprise security, enterprise ops, determinism hardening |
+| `falcon_storage` | 820+ | MVCC, WAL, GC, indexes, OCC, SI litmus, DDL concurrency, recovery, checkpoints, secondary indexes, write sets, WAL observers, USTM, LSM, RocksDB, redb, Hot Row Optimization, Fuzzy Checkpoint, WAL Pipeline Commit |
+| `falcon_server` (integration) | 420+ | Full SQL end-to-end, config migration, service management, CLI subcommands |
+| `falcon_common` | 250+ | Config validation, node role, datum types (incl. Decimal), schema, error hierarchy, RBAC, RLS, security, consistency |
+| `falcon_protocol_pg` | 240+ | SHOW commands, error paths, txn lifecycle, statement timeout, PgServer config, idle timeout, information_schema, views, plan cache |
+| `falcon_cli` | 200+ | SQL splitter, CSV parsing, meta-command parsing, timing, history, completions, cluster/node/txn/failover/policy commands, export/import |
+| `falcon_executor` | 200+ | Operator execution, expression evaluation, window functions, subqueries, governor v2, priority scheduler, RBAC enforcement, Hash Agg spill metrics, vectorized path correctness |
+| `falcon_sql_frontend` | 150+ | Parsing, binding, analysis, view expansion, ALTER TABLE rename, predicate normalization, param inference |
+| `falcon_txn` | 100+ | Txn lifecycle, OCC, stats, history, Wound-Wait deadlock prevention, timestamp batch allocation, READ ONLY mode, timeout, exec summary |
+| `falcon_planner` | 90+ | Plan generation, routing hints, distributed wrapping, view/DDL plans, cost model |
+| `falcon_raft` | 53 | Raft log store, state machine, propose/apply, snapshot, membership |
+| `falcon_segment_codec` | 53 | Segment encoding/decoding, compression (Zstd/LZ4), dictionary, checksums |
+| `falcon_observability` | 46 | Prometheus metrics, structured logging, metric recording functions |
+| `falcon_protocol_native` | 39 | Native binary protocol codec, compression (LZ4), type mapping, golden vectors |
+| `falcon_enterprise` | 50+ | Control plane HA, enterprise RBAC, security, ops automation |
+| `falcon_native_server` | 28 | Native protocol server, session state machine, executor bridge, nonce anti-replay |
+| **Total** | **4,380+** (passing) | 417 `.rs` files across 18 crates · `cargo clippy --workspace`: 0 warnings |
+
+### 8.3 Acceptance Criteria (M1)
+
+1. ✅ `psql` can connect, run DDL, DML, transactions
+2. ✅ Primary–replica replication with WAL shipping
+3. ✅ Promote/failover exercisable with fencing protocol
+4. ✅ txn_type/txn_path not bypassable (hard invariant enforcement)
+5. ✅ Fast-path / slow-path metrics observable via SHOW commands
+6. ✅ Benchmark results reproducible (fixed seed, CSV/JSON export)
+7. ✅ README externally runnable (6 numbered sections)
+8. ✅ Crash recovery restores all committed data
+9. ✅ MVCC GC respects replication safety and active transactions
+
+### 8.4 Milestones
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| **M1** | Stable OLTP, fast/slow-path txns, WAL replication, failover, GC, benchmarking | **Complete** |
+| **M2** | gRPC WAL streaming (tonic), multi-node deployment, WAL observer, replica apply | Complete |
+| **M3** | Production hardening: read-only replicas, graceful shutdown, health checks, query timeout, connection limits | **Complete** |
+| **M4** | Query optimization (hash join, cost-based planner, table stats), PG protocol hardening (prepared statements), EXPLAIN ANALYZE, slow query log, snapshot checkpoint | **Complete** |
+| **M5** | Catalog queries (information_schema), Views (CREATE/DROP/SELECT), ALTER TABLE RENAME, query plan cache | **Complete** |
+| **M6** | JSONB type, correlated subqueries, FK cascading actions, ALTER COLUMN TYPE, recursive CTEs | **Complete** |
+| **M7** | Sequence functions (CREATE/DROP SEQUENCE, nextval/currval/setval, SERIAL), Window functions (ROW_NUMBER, RANK, DENSE_RANK, NTILE, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE, PERCENT_RANK, CUME_DIST, aggregate OVER) | **Complete** |
+| **M8** | DATE type (literals, arithmetic, CURRENT_DATE, EXTRACT, DATE_TRUNC, TO_CHAR, MAKE_DATE, TO_DATE, DATE_ADD, DATE_SUBTRACT, AGE, casting), COPY command (COPY FROM STDIN, COPY TO STDOUT, text/CSV formats, delimiter/quote/escape/null/header options, column selection, PG wire protocol CopyIn/CopyOut sub-protocol) | **Complete** |
+| **M1 Closure** | SQL Parser/Binder hardening: parameterized queries ($1/$2 placeholders, deferred type inference), predicate normalization (BETWEEN→>=AND<=, IN→equality sets, constant folding, CNF), shard key inference (inference_reason, volatile function rejection) | **Complete** |
+| **M9 — OLTP Parity (v1.3)** | SingleStore Rowstore parity: Wound-Wait (O(1) deadlock prevention), timestamp batch allocation (batch=64), Fuzzy Checkpoint (dirty-page-only flush), WAL Pipeline Commit (double-buffer group commit), Hash Aggregation Spill-to-disk (grace hash), Hot Row Optimization (depth-1 chain), Vectorized Filter+Project+Agg full path (`RecordBatch` ≥256), 6-scenario OLTP benchmark suite | **Complete** |
+
+### 8.5 M2 Architecture — gRPC WAL Streaming
+
+```
+Primary Node
+┌───────────────────┐  WAL observer   ┌─────────────────┐  gRPC serve  ┌──────────────────────┐
+│  StorageEngine    │ ──callback──▶   │ ReplicationLog  │ ◀─read_from─ │ WalReplicationService│
+│  (append_wal)     │                 │  (append)       │              │   (tonic server)     │
+└───────────────────┘                 └─────────────────┘              └──────────┬───────────┘
+                                                                                 │
+                                          SubscribeWal (gRPC stream)             │
+                                          AckWal (gRPC unary)                    │
+                                                                                 │
+Replica Node                                                                     │
+┌─────────────────┐   pull_wal_chunk   ┌──────────────────────┐                  │
+│  GrpcTransport  │ ──gRPC call────▶   │ WalReplicationClient │ ─────────────────┘
+│  (tonic client) │ ◀──WalChunk────   │   (generated)        │
+└────────┬────────┘                    └──────────────────────┘
+         │
+         ▼
+  apply_wal_record_to_engine()  ──▶  Replica StorageEngine
+```
+
+**Proto service** (`proto/falcon_replication.proto`):
+
+| RPC | Type | Purpose |
+|-----|------|---------|
+| `SubscribeWal` | server-streaming | Replica subscribes from LSN; primary pushes `WalChunkMessage` |
+| `AckWal` | unary | Replica acks applied LSN for lag tracking |
+| `GetCheckpoint` | server-streaming | New replica requests full snapshot for bootstrap |
+
+**Transport abstraction** (`falcon_cluster::replication`):
+
+| Trait | Sync/Async | Usage |
+|-------|------------|-------|
+| `ReplicationTransport` | sync | In-process testing (`InProcessTransport`, `ChannelTransport`) |
+| `AsyncReplicationTransport` | async | gRPC network transport (`GrpcTransport`); blanket impl over sync |
+
+**Wire format**: `WalChunk` / `LsnWalRecord` serialized as JSON via serde in the proto `record_payload` bytes field. Rust types are the source of truth; proto is the envelope.
+
+**Codegen**: `cargo build -p falcon_cluster --features grpc-codegen` (requires `protoc`). Generated code goes to `src/generated/`.
+
+**M2 delivered**:
+1. ✅ `protoc` v28.3 installed, tonic codegen generates `falcon.replication.rs`
+2. ✅ `GrpcTransport.pull_wal_chunk()` wired to tonic `WalReplicationClient`
+3. ✅ `WalReplication` tonic server trait implemented on `WalReplicationService`
+4. ✅ `StorageEngine::set_wal_observer()` — all WAL writes feed `ReplicationLog` on primary
+5. ✅ Replica pull loop applies WAL records via `apply_wal_record_to_engine`
+6. ✅ CLI flags (`--role`, `--primary-endpoint`, `--grpc-addr`) + example TOML configs
+7. ✅ End-to-end gRPC test: tonic server + client over localhost
+
+**M2 enhancements delivered**:
+1. ✅ True server-streaming: `ReplicationLog::notify` wakes streaming tasks; server holds gRPC stream open, pushes chunks on WAL append
+2. ✅ `GetCheckpoint` implementation: `snapshot_checkpoint_data()` + `CheckpointStreamer` chunked streaming over gRPC
+3. ✅ Connection caching + exponential backoff: `GrpcTransport` caches tonic `Channel`, replica loop uses exp. backoff with configurable `max_backoff_ms`
+4. ✅ `subscribe_wal_stream()`: persistent client-side stream with automatic reconnect on break
+
+### 8.6 M3 Production Hardening
+
+**Replica read-only enforcement**:
+- `Executor::new_read_only()` rejects all DDL/DML writes with `FalconError::ReadOnly` (PG SQLSTATE `25006`)
+- Guards on CREATE TABLE, DROP TABLE, ALTER TABLE, INSERT, UPDATE, DELETE, TRUNCATE, CREATE INDEX, DROP INDEX
+- SELECT, SHOW, EXPLAIN, BEGIN/COMMIT/ROLLBACK remain allowed
+- Dynamically switchable via `set_read_only()` for failover role changes
+
+**Graceful shutdown**:
+- `PgServer::run_with_shutdown()` accepts a `Future<Output=()>` shutdown signal
+- On Ctrl+C: stops accepting new connections, drains active connections (configurable timeout, default 10s), flushes WAL
+- Active connection tracking via `Arc<AtomicUsize>` counter
+
+**Health check HTTP server** (`falcon_server::health`):
+- Lightweight TCP-based HTTP server on `admin_listen_addr` (default `:8080`)
+- `GET /health` — liveness probe (always 200, includes uptime and role)
+- `GET /ready` — readiness probe (200 if ready, 503 if not; includes active connections)
+- `GET /status` — detailed status (role, uptime, connections, WAL stats)
+- Shared shutdown signal with PG server via `tokio::sync::watch`
+
+**Connection limits**:
+- `max_connections` config enforced in `PgServer::spawn_connection()`
+- Exceeding limit returns PG FATAL error with SQLSTATE `53300` ("too many connections")
+
+**Statement timeout**:
+- `SET statement_timeout = <ms>` per-session (PG-compatible syntax)
+- `statement_timeout_ms` in `ServerConfig` for server-wide default
+- Wraps query execution with `tokio::task::spawn_blocking` + `tokio::time::timeout`
+- Timeout returns PG error with SQLSTATE `57014` ("canceling statement due to statement timeout")
+
+**Connection observability**:
+- `SHOW falcon.connections` returns active_connections and max_connections
+- Shared `Arc<AtomicUsize>` counter wired to both `PgServer` and `Executor`
+- EXPLAIN support via `PhysicalPlan::ShowConnections`
+
+**Connection idle timeout**:
+- `idle_timeout_ms` in `ServerConfig` (0 = no timeout, default)
+- Per-session idle timer resets on each client message
+- Idle connections closed with PG FATAL error ("terminating connection due to idle timeout")
+
+### 8.8 M4.1 — Table Statistics Collector
+
+**Data structures** (`falcon_storage/src/stats.rs`):
+- `TableStatistics` — per-table stats: `table_name`, `row_count`, `column_stats`, `collected_at`
+- `ColumnStats` — per-column stats: `column_name`, `distinct_count`, `null_count`, `min_value`, `max_value`, `avg_width`
+- `collect_column_stats(schema, rows)` — computes column stats from row data using `HashSet` for distinct counting
+
+**Storage engine integration** (`falcon_storage/src/engine.rs`):
+- `table_stats: DashMap<TableId, TableStatistics>` cached in `StorageEngine`
+- `analyze_table(name)` — snapshot-scans all committed rows (sentinel `TxnId::MAX`/`Timestamp::MAX`), collects stats, caches result
+- `get_table_stats(id)` / `get_all_table_stats()` — retrieve cached statistics
+
+**SQL commands**:
+- `ANALYZE TABLE <name>` — triggers statistics collection, returns summary (table_name, row_count, columns_analyzed)
+- `SHOW falcon.table_stats` — displays all cached stats (per-column detail)
+- `SHOW falcon.table_stats_<name>` — displays stats for a specific table
+
+**Pipeline wiring**:
+- Binder: `BoundStatement::Analyze { table_name }` / `BoundStatement::ShowTableStats { table_name }`
+- Planner: `PhysicalPlan::Analyze` / `PhysicalPlan::ShowTableStats`
+- Executor: executes plans, returns `ExecutionResult::Query`
+- EXPLAIN: supported via `format_plan` for both new plan nodes
+- Read-only safe: ANALYZE works on read-only replicas (read-only scan)
+
+### 8.9 M4.4 — EXPLAIN ANALYZE
+
+**Syntax**: `EXPLAIN ANALYZE <statement>` — executes the statement and reports both the query plan and actual runtime metrics.
+
+**Pipeline**:
+- Binder: `Statement::Explain { analyze: true, .. }` → `BoundStatement::ExplainAnalyze(Box<BoundStatement>)`
+- Planner: `BoundStatement::ExplainAnalyze` → `PhysicalPlan::ExplainAnalyze(Box<PhysicalPlan>)`
+- Executor: executes the inner plan, measures wall-clock time via `std::time::Instant`, returns plan text rows plus a summary line: `Actual: rows=<N>, cols=<N>, time=<T>ms`
+
+**Differences from plain EXPLAIN**:
+- `EXPLAIN` only formats the plan tree — does **not** execute the inner statement
+- `EXPLAIN ANALYZE` **executes** the inner statement (including DML — UPDATE/DELETE will mutate data), then appends an `Actual:` summary line with real metrics
+
+**Distributed handling** (`falcon_cluster/src/query_engine.rs`):
+- `PhysicalPlan::ExplainAnalyze` routes to shard 0's local executor (the executor handles timing internally)
+- `wrap_distributed` recursively wraps the inner plan, preserving the `ExplainAnalyze` wrapper
+
+**Output format** (single `QUERY PLAN` text column):
+```
+SeqScan ea_t [0, 1] filter=None
+Actual: rows=3, cols=2, time=0.042ms
+```
+
+### 8.10 M4.5 — Slow Query Log
+
+**Data structure** (`falcon_protocol_pg/src/slow_query_log.rs`):
+- `SlowQueryLog` — thread-safe ring buffer with configurable threshold and capacity
+- `SlowQueryEntry` — sql text, duration, timestamp_ms, session_id
+- `record(sql, duration, session_id)` — logs if duration ≥ threshold
+- `snapshot()` → `(Vec<SlowQueryEntry>, total_count)` — read without clearing
+- `clear()` / `set_threshold()` — runtime reconfiguration
+
+**Handler integration** (`falcon_protocol_pg/src/handler.rs`):
+- `QueryHandler` holds `Arc<SlowQueryLog>`, shared across all sessions
+- `with_slow_query_log(log)` builder method for injection
+- Query execution timed via `std::time::Instant`; recorded after commit/abort
+
+**SQL commands**:
+- `SET log_min_duration_statement = <ms>` — set threshold (0 or -1 or default = disabled)
+- `SHOW falcon.slow_queries` — displays threshold, total count, and recent entries with SQL preview, duration, session, timestamp
+- `RESET falcon.slow_queries` — clears log entries and counter
+
+**Output format** (metric / value columns):
+```
+threshold_ms    | 100
+total_slow_queries | 3
+entries_retained   | 3
+query_1         | session=5 duration=152.300ms ts=1739... sql=SELECT ...
+```
+
+### 8.11 M4.6 — Snapshot Checkpoint
+
+**Storage infrastructure** (`falcon_storage/src/wal.rs`, `falcon_storage/src/engine.rs`):
+- `CheckpointData` — serializable snapshot: catalog + all committed rows + WAL segment/LSN position
+- `StorageEngine::checkpoint()` — flush WAL, snapshot all committed rows, write `checkpoint.bin` atomically (tmp+rename), append `WalRecord::Checkpoint` marker, purge old WAL segments
+- `StorageEngine::recover()` — load checkpoint (if exists), replay WAL from checkpoint segment onward, abort uncommitted txns, rebuild secondary indexes
+- `WalWriter::purge_segments_before(segment_id)` — removes old WAL segment files
+
+**SQL command** (handled in `falcon_protocol_pg/src/handler.rs`):
+- `CHECKPOINT` — triggers `storage.checkpoint()`, returns `OK segment=<N> rows=<N>`
+- Returns error if WAL is not enabled (in-memory-only mode)
+- `SHOW falcon.checkpoint_stats` — displays WAL enabled status, records written, flushes
+
+**Recovery flow**:
+1. Load `checkpoint.bin` → restore catalog + committed rows
+2. Read WAL from checkpoint segment onward
+3. Skip records until `WalRecord::Checkpoint` marker
+4. Replay Insert/Update/Delete/Commit/Abort records after marker
+5. Abort any uncommitted transactions (crash semantics)
+6. Rebuild secondary indexes
+
+### 8.12 M4.7 — PG Protocol Hardening (Prepared Statements)
+
+**Extended query protocol** (`falcon_protocol_pg/src/server.rs`):
+- `Parse` → stores SQL in `session.prepared_statements[name]`, returns `ParseComplete`
+- `Bind` → resolves statement to portal in `session.portals[portal]`, returns `BindComplete`
+- `Describe` → calls `handler.describe_query(sql)` to return real `RowDescription` with column names and PG type OIDs; sends `ParameterDescription` (empty, no param support yet) for statement describes
+- `Execute` → runs portal SQL via `handler.handle_query()`, streams results
+- `Close` → properly removes entries from `prepared_statements` or `portals`
+- `Sync` → sends `ReadyForQuery` with correct txn status byte
+
+**`QueryHandler::describe_query(sql)`** (`falcon_protocol_pg/src/handler.rs`):
+- Parses, binds, plans the SQL without executing
+- Extracts output `FieldDescription` from `PhysicalPlan` (column names + PG type OIDs)
+- Handles `SeqScan`, `NestedLoopJoin`, `HashJoin`, `Explain`, `ExplainAnalyze`, `DistPlan`
+- Returns empty vec for DML/DDL (no result columns)
+
+**Limitations** (future work):
+- No parameter binding (`$1`, `$2`) — parameters are not substituted
+- `ParameterDescription` always returns empty type list
+- Aggregate/expression columns default to TEXT OID (no expression type inference yet)
+
+### 8.13 M5.1 — Information Schema (Catalog Queries)
+
+**Supported virtual tables** (`falcon_protocol_pg/src/handler.rs`):
+
+| Virtual Table | Columns | Description |
+|---------------|---------|-------------|
+| `information_schema.tables` | table_catalog, table_schema, table_name, table_type | Lists all user tables; supports `WHERE table_name = '...'` filter |
+| `information_schema.columns` | table_catalog, table_schema, table_name, column_name, ordinal_position, column_default, is_nullable, data_type | Per-column metadata; supports `WHERE table_name = '...'` filter |
+| `information_schema.schemata` | catalog_name, schema_name | Returns `public` and `information_schema` |
+| `information_schema.table_constraints` | constraint_catalog, constraint_schema, constraint_name, table_name, constraint_type | PRIMARY KEY and UNIQUE constraints |
+| `information_schema.key_column_usage` | constraint_name, table_name, column_name, ordinal_position | Key columns for PK/unique constraints |
+| `pg_catalog.pg_attribute` | attrelid, attname, atttypid, attnum, attnotnull | Per-column PG catalog entries; supports `WHERE attrelid = <oid>` filter |
+
+**Implementation**: Intercepted in `handle_system_query()` before SQL parsing. Catalog data is read from `StorageEngine::get_catalog()` and formatted into PG wire messages directly.
+
+**Helper**: `extract_where_eq(sql, column_name)` — lightweight SQL string scanner that extracts `WHERE col = 'value'` filters without full parsing.
+
+### 8.14 M5.2 — Views
+
+**SQL commands**:
+- `CREATE VIEW <name> AS <select>` — stores view definition in catalog
+- `CREATE OR REPLACE VIEW <name> AS <select>` — replaces existing view
+- `DROP VIEW <name>` / `DROP VIEW IF EXISTS <name>` — removes view
+- `SELECT * FROM <view>` — expands view and executes
+
+**Architecture — CTE-based view expansion**:
+
+Views are expanded at bind time by injecting the view's SQL as an implicit CTE. When the binder encounters a view name in a FROM clause (primary table, extra FROM items, or JOIN right tables):
+
+1. `Binder::bind_view_as_cte()` parses the view's stored SQL
+2. Binds it with a fresh `Binder` instance (same catalog)
+3. Builds a synthetic `TableSchema` from the bound SELECT's projections
+4. Registers it as a `BoundCte` with a unique `TableId` (2_000_000+ range)
+5. The executor materializes the CTE data, preserving all filters and projections
+
+**Catalog storage** (`falcon_common/src/schema.rs`):
+- `ViewDef { name, query_sql, or_replace }` stored in `Catalog::views`
+- `Catalog::add_view()`, `find_view()`, `drop_view()` manage view lifecycle
+
+**Pipeline**: `Statement::CreateView` → `BoundStatement::CreateView` → `PhysicalPlan::CreateView` → `StorageEngine::create_view()`
+
+### 8.15 M5.3 — ALTER TABLE RENAME
+
+**New operations**:
+- `ALTER TABLE <name> RENAME COLUMN <old> TO <new>` — renames a column in-place
+- `ALTER TABLE <name> RENAME TO <new_name>` — renames the table
+
+**Pipeline**: `AlterTableOp::RenameColumn { old_name, new_name }` and `AlterTableOp::RenameTable { new_name }` variants in binder → planner → executor → `StorageEngine::alter_table_rename_column()` / `alter_table_rename()`.
+
+**Safety**: rename-to checks that the new table name doesn't conflict with an existing table.
+
+### 8.16 M5.4 — Query Plan Cache
+
+**Data structure** (`falcon_protocol_pg/src/plan_cache.rs`):
+- `PlanCache` — thread-safe (`RwLock`) LRU-like cache of `PhysicalPlan` by normalized SQL
+- Configurable capacity (default 256 entries)
+- SQL normalization: trim, lowercase, collapse whitespace
+- Schema generation counter for lazy invalidation
+
+**Cache policy**:
+- **Cacheable**: `SeqScan`, `NestedLoopJoin`, `HashJoin`, `Insert`, `Update`, `Delete`, `DistPlan`
+- **Not cached**: DDL plans, transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`), `EXPLAIN`
+- **Eviction**: when at capacity, evicts the entry with lowest access count
+- **Invalidation**: schema generation incremented on any DDL (`CREATE/DROP/ALTER TABLE`, `CREATE/DROP VIEW`); stale entries lazily removed on next `get()`
+
+**Integration** (`falcon_protocol_pg/src/handler.rs`):
+- `QueryHandler` holds `Arc<PlanCache>` shared across all sessions
+- Before bind+plan: check cache for matching normalized SQL
+- After planning: store plan in cache
+- After DDL execution: `plan_cache.invalidate()`
+
+**SQL command**: `SHOW falcon.plan_cache` — displays entries, capacity, hits, misses, hit_rate_pct
+
+### 8.22 M7.1 — Sequence Functions
+
+**SQL commands**:
+- `CREATE SEQUENCE <name> [START WITH <n>]` — creates a named sequence with configurable start value (default 1)
+- `DROP SEQUENCE <name>` / `DROP SEQUENCE IF EXISTS <name>` — removes a sequence
+- `SHOW falcon.sequences` — lists all sequences with name and current value
+
+**Functions**:
+- `nextval('<name>')` — increments and returns next value (atomic)
+- `currval('<name>')` — returns last value returned by nextval in current session
+- `setval('<name>', <value>)` — sets sequence to specified value
+
+**SERIAL support**: `SERIAL` / `BIGSERIAL` column types automatically create a backing sequence and inject `nextval()` as the column default.
+
+**Pipeline**:
+- Binder: `BoundExpr::SequenceNextval`, `SequenceCurrval`, `SequenceSetval` for function calls; `BoundStatement::CreateSequence`, `DropSequence`, `ShowSequences` for DDL
+- Planner: `PhysicalPlan::CreateSequence`, `DropSequence`, `ShowSequences`
+- Executor: `eval_expr_with_sequences()` intercepts sequence expressions during projection
+- Storage: `StorageEngine` manages sequences via `DashMap<String, AtomicI64>`
+
+### 8.23 M7.2 — Window Functions
+
+**Supported window functions**:
+
+| Function | Description |
+|----------|-------------|
+| `ROW_NUMBER()` | Sequential row number within partition |
+| `RANK()` | Rank with gaps for ties |
+| `DENSE_RANK()` | Rank without gaps for ties |
+| `NTILE(n)` | Distribute rows into n buckets |
+| `LAG(expr [, offset [, default]])` | Access previous row value |
+| `LEAD(expr [, offset [, default]])` | Access next row value |
+| `FIRST_VALUE(expr)` | First value in window frame |
+| `LAST_VALUE(expr)` | Last value in window frame |
+| `NTH_VALUE(expr, n)` | Nth value in window frame |
+| `PERCENT_RANK()` | Relative rank as percentage |
+| `CUME_DIST()` | Cumulative distribution |
+| `SUM(expr) OVER (...)` | Running/partitioned sum |
+| `COUNT(expr) OVER (...)` | Running/partitioned count |
+
+**Syntax**: `<func>() OVER ([PARTITION BY expr, ...] [ORDER BY expr [ASC|DESC], ...])`
+
+**Architecture**:
+- Frontend: `BoundWindowFunc` and `WindowFunc` enum in `types.rs`; binder recognizes window function syntax via sqlparser AST
+- Planner: window projections pass through as `BoundProjection::Window` in the existing `SeqScan`/`Join` plan nodes
+- Executor: `compute_window_functions()` in `executor_window.rs` handles partitioning, ordering, and per-row evaluation. Called from `exec_seq_scan`, `exec_nested_loop_join`, and `exec_hash_join` when window projections are detected
+
+**Partition/Order handling**: rows are grouped by PARTITION BY expressions, sorted within each partition by ORDER BY, then each window function computes values per-partition.
+
+### 8.17 M6.1 — JSONB Type
+
+**Storage**: `Datum::Jsonb(serde_json::Value)` — stored inline in rows as `serde_json` `Value`.
+
+**Operators & functions**:
+- `->` (key/index lookup returning JSONB), `->>` (key/index lookup returning TEXT)
+- `#>` (path lookup returning JSONB), `#>>` (path lookup returning TEXT)
+- `@>` (containment), `?` (key existence)
+- `jsonb_extract_path`, `jsonb_typeof`, `jsonb_array_length`, `jsonb_each`, `jsonb_object_keys`
+- `jsonb_set`, `jsonb_build_object`, `jsonb_build_array`, `jsonb_strip_nulls`, `jsonb_pretty`
+- `jsonb_agg` (aggregate)
+
+**Column type**: `JSONB` in CREATE TABLE; casting via `::jsonb` or `CAST(... AS JSONB)`.
+
+### 8.18 M6.2 — Correlated Subqueries
+
+**Binding**: `bind_expr_full` accepts optional `outer_schema` for resolving `OuterColumnRef` nodes. Scalar, `IN`/`NOT IN`, and `EXISTS`/`NOT EXISTS` subqueries can reference outer query columns.
+
+**Execution**: `materialize_subquery_correlated` re-executes the subquery for each outer row, injecting outer column values into the subquery filter via `substitute_outer_refs`.
+
+### 8.19 M6.3 — FK Cascading Actions
+
+**DDL syntax**: `REFERENCES tbl(col) ON DELETE CASCADE|SET NULL|SET DEFAULT ON UPDATE CASCADE|SET NULL|SET DEFAULT`
+
+**Execution**: `exec_update` and `exec_delete` check `ForeignKeyAction` on referencing tables:
+- `Cascade`: propagate UPDATE/DELETE to child rows
+- `SetNull`: set FK columns to NULL on parent change
+- `SetDefault`: set FK columns to default value on parent change
+- `Restrict`/`NoAction`: reject if child rows exist (default)
+
+### 8.20 M6.4 — ALTER COLUMN TYPE
+
+**Syntax**: `ALTER TABLE <name> ALTER COLUMN <col> TYPE <new_type>`
+
+**Execution**: scans all rows, casts each value to the new type via `Datum::cast_to`, replaces the row in storage. Fails atomically if any value cannot be cast.
+
+### 8.21 M6.5 — Recursive CTEs
+
+**Syntax**: `WITH RECURSIVE name AS (base_query UNION ALL recursive_query) SELECT ...`
+
+**Binding** (`binder_select.rs`):
+- Detects `WITH RECURSIVE` flag and `UNION ALL` set operation
+- Binds base (anchor) part first without self-reference
+- Derives CTE schema from base projections via `schema_from_projections`
+- Registers CTE schema, then binds recursive part with `inherited_ctes` so it can reference the CTE by name
+- `BoundCte.recursive_select` stores the recursive part
+
+**Execution** (`executor_setops.rs`):
+- `materialize_ctes` detects `recursive_select` on `BoundCte`
+- Executes base part → `base_rows`
+- Iterative fixpoint loop (max 1000 iterations):
+  - Feed `working_rows` as CTE data for recursive reference
+  - Execute recursive part → `new_rows`
+  - Append to `all_rows`; `working_rows = new_rows`
+  - Break when `new_rows` is empty
+- Final `all_rows` stored in `cte_data` for outer query
+
+**Join support**: `exec_nested_loop_join` and `exec_hash_join` check `cte_data` for both left and right join tables, enabling recursive CTEs that JOIN the CTE with real tables (e.g., tree traversal).
+
+**Bug fix**: CompoundIdentifier disambiguation in `binder_expr.rs` now resolves columns by alias offset first (not just catalog lookup), fixing column resolution when CTE tables appear in JOINs with duplicate column names.
+
+---
+
+## 9. Extended Scalar Functions
+
+> **Moved to [docs/extended_scalar_functions.md](docs/extended_scalar_functions.md)** to keep this file manageable.
+> Contains 260+ array matrix and string encoding function specifications.

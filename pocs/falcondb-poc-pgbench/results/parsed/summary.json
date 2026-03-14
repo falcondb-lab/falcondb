@@ -1,0 +1,35 @@
+{
+  "postgresql": {
+    "latency_avg_median_ms": 0.789,
+    "latency_runs_ms": [
+      0.789,
+      0.778,
+      0.86
+    ],
+    "tps_runs": [
+      12671.766065,
+      12858.913477,
+      11627.029965
+    ],
+    "tps_median": 12671.766065
+  },
+  "timestamp": "2026-03-03T11:30:05Z",
+  "falcondb": {
+    "latency_avg_median_ms": 4.131,
+    "latency_runs_ms": [
+      4.131,
+      4.334,
+      3.578
+    ],
+    "tps_runs": [
+      2420.194394,
+      2306.978819,
+      2794.665464
+    ],
+    "tps_median": 2420.194394
+  },
+  "comparison": {
+    "latency_ratio_pg_to_falcon": "0.19",
+    "tps_ratio_falcon_to_pg": "0.19"
+  }
+}

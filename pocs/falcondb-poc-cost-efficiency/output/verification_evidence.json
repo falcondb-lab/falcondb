@@ -1,0 +1,181 @@
+{
+  "test": "cost-efficiency",
+  "verdict": "PASS",
+  "falcon_workload": {
+    "label": "falcon",
+    "host": "127.0.0.1",
+    "port": 5433,
+    "target_rate": 1000,
+    "actual_rate": 967.5,
+    "duration_sec": 10,
+    "total_committed": 9682,
+    "total_errors": 0,
+    "latency_min_us": 350,
+    "latency_max_us": 2238,
+    "latency_avg_us": 563,
+    "latency_p50_us": 515,
+    "latency_p95_us": 887,
+    "latency_p99_us": 1258,
+    "timestamp": "2026-03-04T08:49:25.235394+00:00"
+  },
+  "postgres_workload": {
+    "label": "postgres",
+    "host": "127.0.0.1",
+    "port": 5432,
+    "target_rate": 1000,
+    "actual_rate": 957.3,
+    "duration_sec": 10,
+    "total_committed": 9581,
+    "total_errors": 0,
+    "latency_min_us": 320,
+    "latency_max_us": 2097,
+    "latency_avg_us": 486,
+    "latency_p50_us": 458,
+    "latency_p95_us": 695,
+    "latency_p99_us": 896,
+    "timestamp": "2026-03-04T08:49:57.397755+00:00"
+  },
+  "falcon_resource": {
+    "samples": [
+      {
+        "cpu_percent": 5.0,
+        "disk_write_bytes": 0,
+        "rss_mb": 76.7,
+        "timestamp": "2026-03-04T16:50:25.1361244+08:00",
+        "disk_read_bytes": 0
+      }
+    ],
+    "avg_rss_mb": 76.7,
+    "avg_cpu_percent": 5.0,
+    "label": "falcon",
+    "peak_rss_mb": 76.7,
+    "pid": 42148
+  },
+  "postgres_resource": {
+    "samples": [
+      {
+        "cpu_percent": 8.0,
+        "disk_write_bytes": 0,
+        "rss_mb": 148.0,
+        "timestamp": "2026-03-04T16:50:25.2182343+08:00",
+        "disk_read_bytes": 0
+      }
+    ],
+    "avg_rss_mb": 148.0,
+    "avg_cpu_percent": 8.0,
+    "label": "postgres",
+    "peak_rss_mb": 148.0,
+    "pid": 12744
+  },
+  "peak_falcon": {
+    "normal": {
+      "label": "falcon_peak_normal",
+      "host": "127.0.0.1",
+      "port": 5433,
+      "target_rate": 1000,
+      "actual_rate": 963.0,
+      "duration_sec": 5,
+      "total_committed": 4821,
+      "total_errors": 0,
+      "latency_min_us": 354,
+      "latency_max_us": 3110,
+      "latency_avg_us": 651,
+      "latency_p50_us": 620,
+      "latency_p95_us": 993,
+      "latency_p99_us": 1280,
+      "timestamp": "2026-03-04T08:50:40.719225+00:00"
+    },
+    "2x_peak": {
+      "label": "falcon_peak_2x",
+      "host": "127.0.0.1",
+      "port": 5433,
+      "target_rate": 2000,
+      "actual_rate": 1912.8,
+      "duration_sec": 5,
+      "total_committed": 9573,
+      "total_errors": 0,
+      "latency_min_us": 347,
+      "latency_max_us": 2152,
+      "latency_avg_us": 531,
+      "latency_p50_us": 483,
+      "latency_p95_us": 807,
+      "latency_p99_us": 1084,
+      "timestamp": "2026-03-04T08:50:45.855129+00:00"
+    },
+    "recovery": {
+      "label": "falcon_peak_recovery",
+      "host": "127.0.0.1",
+      "port": 5433,
+      "target_rate": 1000,
+      "actual_rate": 965.1,
+      "duration_sec": 5,
+      "total_committed": 4831,
+      "total_errors": 0,
+      "latency_min_us": 345,
+      "latency_max_us": 2669,
+      "latency_avg_us": 571,
+      "latency_p50_us": 535,
+      "latency_p95_us": 835,
+      "latency_p99_us": 1162,
+      "timestamp": "2026-03-04T08:50:50.992638+00:00"
+    }
+  },
+  "peak_postgres": {
+    "normal": {
+      "label": "postgres_peak_normal",
+      "host": "127.0.0.1",
+      "port": 5432,
+      "target_rate": 1000,
+      "actual_rate": 946.6,
+      "duration_sec": 5,
+      "total_committed": 4740,
+      "total_errors": 0,
+      "latency_min_us": 326,
+      "latency_max_us": 2705,
+      "latency_avg_us": 483,
+      "latency_p50_us": 456,
+      "latency_p95_us": 688,
+      "latency_p99_us": 921,
+      "timestamp": "2026-03-04T08:51:16.573066+00:00"
+    },
+    "2x_peak": {
+      "label": "postgres_peak_2x",
+      "host": "127.0.0.1",
+      "port": 5432,
+      "target_rate": 2000,
+      "actual_rate": 1872.5,
+      "duration_sec": 5,
+      "total_committed": 9371,
+      "total_errors": 0,
+      "latency_min_us": 316,
+      "latency_max_us": 1823,
+      "latency_avg_us": 437,
+      "latency_p50_us": 417,
+      "latency_p95_us": 600,
+      "latency_p99_us": 791,
+      "timestamp": "2026-03-04T08:51:21.744246+00:00"
+    },
+    "recovery": {
+      "label": "postgres_peak_recovery",
+      "host": "127.0.0.1",
+      "port": 5432,
+      "target_rate": 1000,
+      "actual_rate": 943.6,
+      "duration_sec": 5,
+      "total_committed": 4724,
+      "total_errors": 0,
+      "latency_min_us": 325,
+      "latency_max_us": 1734,
+      "latency_avg_us": 455,
+      "latency_p50_us": 439,
+      "latency_p95_us": 595,
+      "latency_p99_us": 746,
+      "timestamp": "2026-03-04T08:51:26.924340+00:00"
+    }
+  },
+  "cost_comparison": {
+    "falcon_monthly_usd": 99.28,
+    "postgres_monthly_usd": 294.34,
+    "saving_percent": 66.3
+  }
+}

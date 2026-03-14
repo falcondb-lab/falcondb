@@ -1,0 +1,64 @@
+# FalconDB — Windows IOCP WAL Benchmark Configuration
+#
+# Compares baseline sync WAL vs IOCP async WAL under write-heavy OLTP load.
+# Run via: scripts/bench_windows_iocp_wal.ps1
+
+[benchmark]
+name = "windows_iocp_wal"
+description = "WAL write + flush latency: sync vs IOCP async"
+warmup_seconds = 5
+run_seconds = 30
+# Number of concurrent writer threads
+writer_threads = [1, 4, 8, 16]
+# Record payload sizes (bytes)
+record_sizes = [64, 256, 1024, 4096]
+
+[baseline]
+# Standard sync WAL (BufWriter + sync_data per batch)
+async_io_enabled = false
+flush_policy = "group_commit"
+group_commit_max_wait_us = 1000
+group_commit_max_batch_bytes = 4194304  # 4 MB
+max_segment_size = 67108864             # 64 MB
+
+[iocp]
+# IOCP async WAL (Windows native)
+async_io_enabled = true
+flush_policy = "group_commit"
+group_commit_max_wait_us = 1000
+group_commit_max_batch_bytes = 4194304
+max_segment_size = 67108864
+write_through = false
+sequential_scan = true
+iocp_thread_count = 4
+max_inflight_bytes = 67108864           # 64 MB
+max_inflight_ops = 256
+
+[snapshot_streaming]
+# Snapshot chunk streaming benchmark
+chunk_sizes = [65536, 262144, 1048576, 4194304]  # 64KB, 256KB, 1MB, 4MB
+snapshot_sizes_mb = [10, 100, 500]
+max_inflight_chunks = 4
+
+[metrics]
+# Collected for each configuration
+latency_percentiles = ["p50", "p90", "p99", "p999"]
+throughput_metrics = ["records_per_sec", "bytes_per_sec", "flushes_per_sec"]
+wal_metrics = [
+    "sync_count",
+    "avg_sync_latency_us",
+    "max_sync_latency_us",
+    "group_commit_batches",
+    "avg_records_per_batch",
+    "segment_rotations",
+    "flush_by_batch_full",
+    "flush_by_timer",
+]
+io_metrics = [
+    "bytes_written",
+    "write_ops",
+    "flush_ops",
+    "avg_flush_latency_us",
+    "max_flush_latency_us",
+    "inflight_bytes",
+]

@@ -1,0 +1,54 @@
+[package]
+name = "falcon_bench"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+lsm              = ["falcon_storage/lsm"]
+# Enable heap allocation tracking (debug/profiling only; large overhead)
+dhat-heap        = ["dep:dhat"]
+
+[dependencies]
+falcon_common    = { path = "../falcon_common" }
+falcon_cluster   = { path = "../falcon_cluster" }
+falcon_storage   = { path = "../falcon_storage" }
+falcon_txn       = { path = "../falcon_txn" }
+falcon_executor  = { path = "../falcon_executor" }
+falcon_protocol_pg = { path = "../falcon_protocol_pg" }
+clap.workspace   = true
+serde.workspace  = true
+serde_json.workspace = true
+tokio.workspace  = true
+tokio-postgres   = { version = "0.7", features = [] }
+# Optional heap-profiling allocator
+dhat             = { version = "0.3", optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+bytes.workspace     = true
+falcon_bench        = { path = ".", features = [] }
+
+# ── Micro benchmarks ──────────────────────────────────────────────────────────
+[[bench]]
+name    = "bench_codec"
+path    = "benches/micro/bench_codec.rs"
+harness = false
+
+# ── Storage benchmarks ────────────────────────────────────────────────────────
+[[bench]]
+name    = "bench_memtable_dml"
+path    = "benches/storage/bench_memtable_dml.rs"
+harness = false
+
+# ── WAL benchmarks ────────────────────────────────────────────────────────────
+[[bench]]
+name    = "bench_wal_append"
+path    = "benches/wal/bench_wal_append.rs"
+harness = false
+
+# ── OLTP scenario benchmarks (5 canonical scenarios) ─────────────────────────
+[[bench]]
+name    = "bench_oltp_scenarios"
+path    = "benches/storage/bench_oltp_scenarios.rs"
+harness = false

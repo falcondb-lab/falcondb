@@ -1,0 +1,23 @@
+[package]
+name = "falcon_native_server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+falcon_common = { path = "../falcon_common" }
+falcon_protocol_native = { path = "../falcon_protocol_native" }
+falcon_sql_frontend = { path = "../falcon_sql_frontend" }
+falcon_planner = { path = "../falcon_planner" }
+falcon_executor = { path = "../falcon_executor" }
+falcon_storage = { path = "../falcon_storage" }
+falcon_txn = { path = "../falcon_txn" }
+falcon_cluster = { path = "../falcon_cluster" }
+falcon_observability = { path = "../falcon_observability" }
+tokio.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true

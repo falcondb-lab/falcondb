@@ -1,0 +1,25 @@
+{
+  "workload": "A",
+  "name": "write_heavy",
+  "target": "falcondb",
+  "timestamp": "20260304T115257Z",
+  "config": {
+    "clients": 16,
+    "duration_sec": 10,
+    "host": "127.0.0.1",
+    "port": 5433,
+    "mix": "90% INSERT / 10% UPDATE",
+    "durability": "fsync + synchronous_commit"
+  },
+  "results": {
+    "tps": 44048.331011,
+    "latency_avg_ms": 0.363,
+    "rows_before": 10000,
+    "rows_after": 404772,
+    "rows_inserted": 394772
+  },
+  "verification": {
+    "pk_unique": true,
+    "duplicate_pks": 0
+  }
+}

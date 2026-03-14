@@ -1,0 +1,96 @@
+# Rust build artifacts
+/target
+Cargo.lock
+
+# Editor swap files
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test/benchmark results
+/*.txt
+/test_results*.txt
+/clippy_nursery*.txt
+
+# Archives
+/*.zip
+*.tar.gz
+*.tar
+
+# Generated code
+/check_*.rs
+
+# Build outputs
+/dist/windows/*.exe
+/dist/windows/stage/
+/fua_bench.exe
+/fua_bench.pdb
+
+# Runtime data directories (unified pattern)
+# Main data directory
+/data/
+# Pattern: *_data/ (e.g., falcon_data, test_data, bench_data)
+*_data/
+# Pattern: */data/ (e.g., node1/data, primary/data)
+*/data/
+# PoC data directories
+pocs/*/data/
+pocs/**/*_data/
+# Legacy specific directories
+/falcon_data/
+/falcon_bench_data/
+
+# Logs
+*.log
+*.pid
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+config.local.toml
+secrets.toml
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+*.cache
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Node.js
+node_modules/
+package-lock.json
+yarn.lock
+
+# Java/Maven
+target/
+*.class
+.classpath
+.project
+.settings/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+venv/
+.venv/

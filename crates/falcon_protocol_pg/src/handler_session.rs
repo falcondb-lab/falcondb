@@ -1,0 +1,2344 @@
+use falcon_planner::Planner;
+use falcon_sql_frontend::binder::Binder;
+use falcon_sql_frontend::parser::parse_sql;
+
+use crate::codec::{BackendMessage, FieldDescription};
+use crate::session::PgSession;
+
+use crate::handler::QueryHandler;
+use crate::handler_utils::{
+    bind_params, parse_execute_statement, parse_prepare_statement, parse_set_command,
+    parse_set_log_min_duration, text_params_to_datum,
+};
+
+impl QueryHandler {
+    /// Intercept system queries that psql and PG drivers send.
+    /// Returns Some(messages) if handled, None to fall through to normal execution.
+    pub(crate) fn handle_system_query(
+        &self,
+        sql: &str,
+        session: &mut PgSession,
+    ) -> Option<Vec<BackendMessage>> {
+        // P1-5: Zero-alloc fast-exit for pure OLTP queries.
+        // System commands handled here begin with one of: S/s R/r C/c D/d U/u P/p W/w
+        // INSERT and UPDATE are already excluded by the caller (handler.rs first-byte check).
+        // For any other first byte, this function can never match — return None immediately
+        // without allocating a lowercased String.
+        let sql_trimmed = sql.trim().trim_end_matches(';').trim();
+        let first = sql_trimmed.as_bytes().first().copied().unwrap_or(0);
+        if !matches!(first, b'S' | b's' | b'R' | b'r' | b'C' | b'c' | b'D' | b'd'
+                          | b'U' | b'u' | b'P' | b'p' | b'W' | b'w' | b'B' | b'b'
+                          | b'F' | b'f' | b'G' | b'g' | b'L' | b'l' | b'A' | b'a') {
+            return None;
+        }
+        // Allocate the lowercase copy exactly once for all subsequent comparisons.
+        // to_ascii_lowercase() is ~2× faster than to_lowercase() for ASCII-only SQL.
+        let sql_lower_owned = sql_trimmed.to_ascii_lowercase();
+        let sql_lower: &str = sql_lower_owned.as_str();
+
+        // SELECT version() / SELECT pg_catalog.version()
+        if sql_lower == "select version()"
+            || sql_lower.starts_with("select version()")
+            || sql_lower.contains("pg_catalog.version()")
+        {
+            return Some(self.single_row_result(
+                vec![("version", 25, -1)],
+                vec![vec![Some(
+                    format!(
+                        "PostgreSQL 18.0.0 on FalconDB {} (RocksDB-backed distributed OLTP)",
+                        falcon_common::globals::falcon_edition()
+                    ),
+                )]],
+            ));
+        }
+
+        // SELECT current_setting('param') — pgjdbc and Hibernate use this
+        if sql_lower.contains("current_setting(") {
+            if let Some(after_open) = sql_lower
+                .find("current_setting(")
+                .map(|i| i + "current_setting(".len())
+            {
+                let rest = &sql_lower[after_open..];
+                let rest = rest.trim_start_matches(['\'', '"']);
+                let param = rest
+                    .split(['\'', '"', ')', ','])
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                let value = session.get_guc(param).map_or_else(
+                    || match param {
+                        "transaction_isolation" => "read committed".into(),
+                        "datestyle" => "ISO, MDY".into(),
+                        "standard_conforming_strings" => "on".into(),
+                        "integer_datetimes" => "on".into(),
+                        "max_identifier_length" => "63".into(),
+                        "server_encoding" | "client_encoding" => "UTF8".into(),
+                        "timezone" => "UTC".into(),
+                        _ => String::new(),
+                    },
+                    std::string::ToString::to_string,
+                );
+                return Some(self.single_row_result(
+                    vec![("current_setting", 25, -1)],
+                    vec![vec![Some(value)]],
+                ));
+            }
+        }
+
+        // SELECT current_schema() / current_database() / current_user
+        if sql_lower == "select current_schema()" || sql_lower.starts_with("select current_schema")
+        {
+            return Some(self.single_row_result(
+                vec![("current_schema", 25, -1)],
+                vec![vec![Some("public".into())]],
+            ));
+        }
+        if sql_lower == "select current_database()"
+            || sql_lower.starts_with("select current_database")
+        {
+            return Some(self.single_row_result(
+                vec![("current_database", 25, -1)],
+                vec![vec![Some(session.database.clone())]],
+            ));
+        }
+        if sql_lower == "select current_user" {
+            return Some(self.single_row_result(
+                vec![("current_user", 25, -1)],
+                vec![vec![Some("falcon".into())]],
+            ));
+        }
+
+        // SELECT pg_postmaster_start_time()
+        if sql_lower.contains("pg_postmaster_start_time") {
+            let epoch_ms = falcon_common::globals::server_start_epoch_ms();
+            let ts = chrono::DateTime::from_timestamp_millis(epoch_ms)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.3f+00").to_string())
+                .unwrap_or_else(|| "unknown".into());
+            return Some(self.single_row_result(
+                vec![("pg_postmaster_start_time", 1184, 8)],
+                vec![vec![Some(ts)]],
+            ));
+        }
+
+        // SHOW falcon.uptime
+        if sql_lower == "show falcon.uptime" {
+            let secs = falcon_common::globals::server_uptime_secs();
+            let h = secs as u64 / 3600;
+            let m = (secs as u64 % 3600) / 60;
+            let s = secs as u64 % 60;
+            return Some(self.single_row_result(
+                vec![("uptime", 25, -1)],
+                vec![vec![Some(format!("{h}h {m}m {s}s ({secs:.1}s)"))]],
+            ));
+        }
+
+        // SHOW falcon.memory
+        if sql_lower == "show falcon.memory" {
+            let snap = self.storage.memory_snapshot();
+            let rows = vec![
+                vec![Some("mvcc_bytes".into()), Some(snap.mvcc_bytes.to_string())],
+                vec![
+                    Some("index_bytes".into()),
+                    Some(snap.index_bytes.to_string()),
+                ],
+                vec![
+                    Some("write_buffer_bytes".into()),
+                    Some(snap.write_buffer_bytes.to_string()),
+                ],
+                vec![
+                    Some("total_bytes".into()),
+                    Some(snap.total_bytes.to_string()),
+                ],
+            ];
+            return Some(self.single_row_result(vec![("metric", 25, -1), ("value", 25, -1)], rows));
+        }
+
+        // SHOW falcon.replication
+        if sql_lower == "show falcon.replication" {
+            let role = falcon_common::globals::node_role().to_owned();
+            let ws = self.storage.wal_stats_snapshot();
+            let rows = vec![
+                vec![Some("node_role".into()), Some(role)],
+                vec![
+                    Some("wal_records_written".into()),
+                    Some(ws.records_written.to_string()),
+                ],
+                vec![Some("wal_flushes".into()), Some(ws.flushes.to_string())],
+                vec![
+                    Some("wal_fsync_total_us".into()),
+                    Some(ws.fsync_total_us.to_string()),
+                ],
+                vec![
+                    Some("wal_fsync_max_us".into()),
+                    Some(ws.fsync_max_us.to_string()),
+                ],
+                vec![
+                    Some("wal_fsync_avg_us".into()),
+                    Some(ws.fsync_avg_us.to_string()),
+                ],
+                vec![
+                    Some("wal_backlog_bytes".into()),
+                    Some(ws.backlog_bytes.to_string()),
+                ],
+            ];
+            return Some(self.single_row_result(vec![("metric", 25, -1), ("value", 25, -1)], rows));
+        }
+
+        // SHOW falcon.config
+        if sql_lower == "show falcon.config" {
+            let wal_enabled = self.storage.is_wal_enabled();
+            let role = falcon_common::globals::node_role().to_owned();
+            let engine = falcon_common::globals::default_table_engine().to_owned();
+            let rows = vec![
+                vec![Some("node_role".into()), Some(role)],
+                vec![Some("default_table_engine".into()), Some(engine)],
+                vec![Some("wal_enabled".into()), Some(wal_enabled.to_string())],
+            ];
+            return Some(
+                self.single_row_result(vec![("parameter", 25, -1), ("value", 25, -1)], rows),
+            );
+        }
+
+        // REFRESH MATERIALIZED VIEW <name>
+        if sql_lower.starts_with("refresh materialized view") {
+            let mv_name = sql_lower
+                .strip_prefix("refresh materialized view")
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            if mv_name.is_empty() {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "REFRESH MATERIALIZED VIEW requires a view name".into(),
+                }]);
+            }
+            let bound = falcon_sql_frontend::types::BoundStatement::RefreshMaterializedView {
+                name: mv_name.clone(),
+            };
+            let plan = match Planner::plan(&bound) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "42P01".into(),
+                        message: format!("{e}"),
+                    }]);
+                }
+            };
+            return Some(match self.execute_single_plan(sql, plan, session) {
+                Ok(msgs) => msgs,
+                Err(e) => vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "XX000".into(),
+                    message: format!("{e}"),
+                }],
+            });
+        }
+
+        // SET log_min_duration_statement = <ms>
+        if let Some(threshold_ms) = parse_set_log_min_duration(sql_lower) {
+            self.observability
+                .slow_query_log
+                .set_threshold(std::time::Duration::from_millis(threshold_ms));
+            return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
+        }
+
+        // Cluster admin commands: SELECT falcon_add_node(id), falcon_remove_node(id),
+        // falcon_promote_leader(shard_id), falcon_rebalance_apply()
+        if sql_lower.starts_with("select falcon_") {
+            if let Some(result) = self.parse_and_dispatch_admin_command(sql_lower) {
+                return Some(result);
+            }
+        }
+
+        // ── PITR / WAL archiving SQL functions ──────────────────────────────
+
+        // SELECT pg_create_restore_point('name')
+        if sql_lower.starts_with("select pg_create_restore_point(") {
+            let name = extract_string_arg(sql_lower, "select pg_create_restore_point(");
+            match self.storage.create_restore_point(&name) {
+                Ok(lsn) => {
+                    return Some(self.single_row_result(
+                        vec![("pg_create_restore_point", 25, -1)],
+                        vec![vec![Some(format!(
+                            "{:X}/{:08X}",
+                            lsn >> 32,
+                            lsn & 0xFFFF_FFFF
+                        ))]],
+                    ));
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "XX000".into(),
+                        message: format!("pg_create_restore_point failed: {e}"),
+                    }]);
+                }
+            }
+        }
+
+        // SELECT pg_start_backup('label')
+        if sql_lower.starts_with("select pg_start_backup(") {
+            let label = extract_string_arg(sql_lower, "select pg_start_backup(");
+            match self.storage.start_base_backup(&label) {
+                Ok((_backup_id, lsn)) => {
+                    return Some(self.single_row_result(
+                        vec![("pg_start_backup", 25, -1)],
+                        vec![vec![Some(format!(
+                            "{:X}/{:08X}",
+                            lsn >> 32,
+                            lsn & 0xFFFF_FFFF
+                        ))]],
+                    ));
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "XX000".into(),
+                        message: format!("pg_start_backup failed: {e}"),
+                    }]);
+                }
+            }
+        }
+
+        // SELECT pg_stop_backup()
+        if sql_lower.starts_with("select pg_stop_backup()") {
+            match self.storage.stop_base_backup(0, "manual", "") {
+                Ok(lsn) => {
+                    return Some(self.single_row_result(
+                        vec![("pg_stop_backup", 25, -1)],
+                        vec![vec![Some(format!(
+                            "{:X}/{:08X}",
+                            lsn >> 32,
+                            lsn & 0xFFFF_FFFF
+                        ))]],
+                    ));
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "XX000".into(),
+                        message: format!("pg_stop_backup failed: {e}"),
+                    }]);
+                }
+            }
+        }
+
+        // SELECT pg_current_wal_lsn()
+        if sql_lower.starts_with("select pg_current_wal_lsn()") {
+            let lsn = self.storage.current_wal_lsn();
+            return Some(self.single_row_result(
+                vec![("pg_current_wal_lsn", 25, -1)],
+                vec![vec![Some(format!(
+                    "{:X}/{:08X}",
+                    lsn >> 32,
+                    lsn & 0xFFFF_FFFF
+                ))]],
+            ));
+        }
+
+        // SELECT pg_walfile_name(lsn) — returns the WAL segment filename for a given LSN
+        if sql_lower.starts_with("select pg_walfile_name(") {
+            let lsn_str = extract_string_arg(sql_lower, "select pg_walfile_name(");
+            let seg_id = lsn_str.parse::<u64>().unwrap_or(0);
+            let fname = falcon_storage::wal::segment_filename(seg_id);
+            return Some(
+                self.single_row_result(vec![("pg_walfile_name", 25, -1)], vec![vec![Some(fname)]]),
+            );
+        }
+
+        // CHECKPOINT — trigger a storage checkpoint (WAL compaction)
+        if sql_lower == "checkpoint" {
+            match self.storage.checkpoint() {
+                Ok((segment_id, row_count)) => {
+                    return Some(self.single_row_result(
+                        vec![("checkpoint", 25, -1)],
+                        vec![vec![Some(format!(
+                            "OK segment={segment_id} rows={row_count}"
+                        ))]],
+                    ));
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "XX000".into(),
+                        message: format!("CHECKPOINT failed: {e}"),
+                    }]);
+                }
+            }
+        }
+
+        // SELECT falcon_pitr_status() — show PITR archiver status
+        if sql_lower.starts_with("select falcon_pitr_status()") {
+            let (enabled, seg_count, bytes) = self.storage.pitr_stats();
+            return Some(self.single_row_result(
+                vec![
+                    ("enabled", 16 /* bool oid */, -1),
+                    ("segments_archived", 20 /* int8 oid */, 8),
+                    ("bytes_archived", 20, 8),
+                ],
+                vec![vec![
+                    Some(if enabled { "t" } else { "f" }.into()),
+                    Some(seg_count.to_string()),
+                    Some(bytes.to_string()),
+                ]],
+            ));
+        }
+
+        // SELECT falcon_list_restore_points() — list named restore points
+        if sql_lower.starts_with("select falcon_list_restore_points()") {
+            let points = self.storage.list_restore_points();
+            let rows: Vec<Vec<Option<String>>> = points
+                .iter()
+                .map(|rp| {
+                    vec![
+                        Some(rp.name.clone()),
+                        Some(format!(
+                            "{:X}/{:08X}",
+                            rp.lsn.0 >> 32,
+                            rp.lsn.0 & 0xFFFF_FFFF
+                        )),
+                        Some(rp.created_at_ms.to_string()),
+                    ]
+                })
+                .collect();
+            return Some(self.single_row_result(
+                vec![("name", 25, -1), ("lsn", 25, -1), ("created_at_ms", 20, 8)],
+                rows,
+            ));
+        }
+
+        // SELECT falcon_list_backups() — list base backups
+        if sql_lower.starts_with("select falcon_list_backups()") {
+            let backups = self.storage.list_base_backups();
+            let rows: Vec<Vec<Option<String>>> = backups
+                .iter()
+                .map(|b| {
+                    vec![
+                        Some(b.label.clone()),
+                        Some(format!(
+                            "{:X}/{:08X}",
+                            b.start_lsn.0 >> 32,
+                            b.start_lsn.0 & 0xFFFF_FFFF
+                        )),
+                        Some(format!(
+                            "{:X}/{:08X}",
+                            b.end_lsn.0 >> 32,
+                            b.end_lsn.0 & 0xFFFF_FFFF
+                        )),
+                        Some(b.size_bytes.to_string()),
+                    ]
+                })
+                .collect();
+            return Some(self.single_row_result(
+                vec![
+                    ("label", 25, -1),
+                    ("start_lsn", 25, -1),
+                    ("end_lsn", 25, -1),
+                    ("size_bytes", 20, 8),
+                ],
+                rows,
+            ));
+        }
+
+        // SELECT falcon_resource_isolation_stats() — show resource isolation metrics
+        if sql_lower.starts_with("select falcon_resource_isolation_stats()") {
+            let stats = self.storage.resource_isolation_stats();
+            return Some(self.single_row_result(
+                vec![
+                    ("fg_inflight", 20, 8),
+                    ("fg_total", 20, 8),
+                    ("bg_throttled", 16, -1),
+                    ("io_consumed_bytes", 20, 8),
+                    ("io_throttles", 20, 8),
+                    ("io_throttle_us", 20, 8),
+                    ("cpu_inflight", 20, 8),
+                    ("cpu_max", 20, 8),
+                    ("cpu_started", 20, 8),
+                    ("cpu_rejected", 20, 8),
+                ],
+                vec![vec![
+                    Some(stats.fg_inflight.to_string()),
+                    Some(stats.fg_total.to_string()),
+                    Some(if stats.bg_throttled { "t" } else { "f" }.into()),
+                    Some(stats.io.total_consumed_bytes.to_string()),
+                    Some(stats.io.total_throttles.to_string()),
+                    Some(stats.io.total_throttle_us.to_string()),
+                    Some(stats.cpu.inflight.to_string()),
+                    Some(stats.cpu.max_concurrent.to_string()),
+                    Some(stats.cpu.total_started.to_string()),
+                    Some(stats.cpu.total_rejected.to_string()),
+                ]],
+            ));
+        }
+
+        // RESET falcon.slow_queries — clear the slow query log
+        if sql_lower == "reset falcon.slow_queries" {
+            self.observability.slow_query_log.clear();
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "RESET".into(),
+            }]);
+        }
+
+        // ── PG utility functions ──
+
+        // SELECT pg_backend_pid()
+        if sql_lower.contains("pg_backend_pid()") {
+            return Some(self.single_row_result(
+                vec![("pg_backend_pid", 23, 4)],
+                vec![vec![Some(session.id.to_string())]],
+            ));
+        }
+
+        // SELECT pg_is_in_recovery()
+        if sql_lower.contains("pg_is_in_recovery()") {
+            let in_recovery = falcon_common::globals::node_role() != "leader";
+            return Some(self.single_row_result(
+                vec![("pg_is_in_recovery", 16, 1)],
+                vec![vec![Some(if in_recovery { "t" } else { "f" }.into())]],
+            ));
+        }
+
+        // SELECT txid_current() / pg_current_xact_id()
+        if sql_lower.contains("txid_current()") || sql_lower.contains("pg_current_xact_id()") {
+            let xid = session.txn.as_ref().map_or(0u64, |t| t.txn_id.0);
+            return Some(self.single_row_result(
+                vec![("txid_current", 20, 8)],
+                vec![vec![Some(xid.to_string())]],
+            ));
+        }
+
+        // SELECT pg_sleep(seconds)
+        if sql_lower.contains("pg_sleep(") {
+            if let Some(secs) = extract_numeric_arg(sql_lower, "pg_sleep(") {
+                let dur = std::time::Duration::from_secs_f64(secs);
+                std::thread::sleep(dur);
+            }
+            return Some(self.single_row_result(
+                vec![("pg_sleep", 2278, -1)],
+                vec![vec![Some(String::new())]],
+            ));
+        }
+
+        // SELECT pg_cancel_backend(pid)
+        if sql_lower.contains("pg_cancel_backend(") {
+            return Some(self.single_row_result(
+                vec![("pg_cancel_backend", 16, 1)],
+                vec![vec![Some("t".into())]],
+            ));
+        }
+
+        // SELECT pg_terminate_backend(pid)
+        if sql_lower.contains("pg_terminate_backend(") {
+            return Some(self.single_row_result(
+                vec![("pg_terminate_backend", 16, 1)],
+                vec![vec![Some("t".into())]],
+            ));
+        }
+
+        // SELECT pg_table_size(regclass) / pg_total_relation_size(regclass) / pg_relation_size(regclass)
+        if sql_lower.contains("pg_table_size(")
+            || sql_lower.contains("pg_total_relation_size(")
+            || sql_lower.contains("pg_relation_size(")
+        {
+            let table_name = extract_string_arg_from(sql_lower, "pg_table_size(")
+                .or_else(|| extract_string_arg_from(sql_lower, "pg_total_relation_size("))
+                .or_else(|| extract_string_arg_from(sql_lower, "pg_relation_size("))
+                .unwrap_or_default();
+            let size = if !table_name.is_empty() {
+                let catalog = self.storage.get_catalog();
+                catalog.find_table(&table_name).map_or(0i64, |schema| {
+                    self.storage.estimate_table_size_bytes(schema.id) as i64
+                })
+            } else {
+                0
+            };
+            let col_name = if sql_lower.contains("pg_total_relation_size(") {
+                "pg_total_relation_size"
+            } else if sql_lower.contains("pg_relation_size(") {
+                "pg_relation_size"
+            } else {
+                "pg_table_size"
+            };
+            return Some(
+                self.single_row_result(vec![(col_name, 20, 8)], vec![vec![Some(size.to_string())]]),
+            );
+        }
+
+        // SELECT pg_database_size(name|oid)
+        if sql_lower.contains("pg_database_size(") {
+            let total: i64 = self.storage.estimate_total_size_bytes() as i64;
+            return Some(self.single_row_result(
+                vec![("pg_database_size", 20, 8)],
+                vec![vec![Some(total.to_string())]],
+            ));
+        }
+
+        // SELECT pg_size_pretty(bigint)
+        if sql_lower.contains("pg_size_pretty(") {
+            let bytes = extract_numeric_arg(sql_lower, "pg_size_pretty(")
+                .map(|n| n as i64)
+                .unwrap_or(0);
+            let pretty = format_size_pretty(bytes);
+            return Some(
+                self.single_row_result(vec![("pg_size_pretty", 25, -1)], vec![vec![Some(pretty)]]),
+            );
+        }
+
+        // pg_advisory_lock / pg_advisory_unlock / pg_try_advisory_lock — stubs
+        if sql_lower.contains("pg_advisory_lock(") || sql_lower.contains("pg_advisory_xact_lock(") {
+            return Some(self.single_row_result(
+                vec![("pg_advisory_lock", 2278, -1)],
+                vec![vec![Some(String::new())]],
+            ));
+        }
+        if sql_lower.contains("pg_try_advisory_lock(")
+            || sql_lower.contains("pg_try_advisory_xact_lock(")
+        {
+            return Some(self.single_row_result(
+                vec![("pg_try_advisory_lock", 16, 1)],
+                vec![vec![Some("t".into())]],
+            ));
+        }
+        if sql_lower.contains("pg_advisory_unlock(")
+            || sql_lower.contains("pg_advisory_unlock_all()")
+        {
+            return Some(self.single_row_result(
+                vec![("pg_advisory_unlock", 16, 1)],
+                vec![vec![Some("t".into())]],
+            ));
+        }
+
+        // DO $$ ... $$ — anonymous code block (stub: accept and return success)
+        if sql_lower.starts_with("do ") {
+            return Some(vec![BackendMessage::CommandComplete { tag: "DO".into() }]);
+        }
+
+        // DISCARD ALL / PLANS / TEMP / SEQUENCES
+        if sql_lower.starts_with("discard ") {
+            let what = sql_lower.trim_start_matches("discard ").trim();
+            match what {
+                "all" => session.discard_all(),
+                "plans" => {
+                    session.prepared_statements.clear();
+                    session.portals.clear();
+                    session.unnamed_portal = None;
+                }
+                "temp" | "temporary" => {} // no temp tables yet
+                "sequences" => {}          // no session sequences yet
+                _ => {}
+            }
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "DISCARD".into(),
+            }]);
+        }
+
+        // COMMENT ON ... — accept and ignore (metadata storage not implemented)
+        if sql_lower.starts_with("comment on ") {
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "COMMENT".into(),
+            }]);
+        }
+
+        // SET SESSION CHARACTERISTICS AS TRANSACTION ... (pgjdbc setReadOnly / setTransactionIsolation)
+        // Also handles: SET TRANSACTION READ ONLY/WRITE, SET TRANSACTION ISOLATION LEVEL ...
+        if sql_lower.contains("session characteristics as transaction")
+            || sql_lower.starts_with("set transaction")
+        {
+            if sql_lower.contains("read only") {
+                session.set_guc("default_transaction_read_only", "on");
+            } else if sql_lower.contains("read write") {
+                session.set_guc("default_transaction_read_only", "off");
+            }
+            if sql_lower.contains("isolation level") {
+                let level = if sql_lower.contains("serializable") {
+                    "serializable"
+                } else if sql_lower.contains("repeatable read") {
+                    "repeatable read"
+                } else if sql_lower.contains("read uncommitted") {
+                    "read uncommitted"
+                } else {
+                    "read committed"
+                };
+                session.set_guc("default_transaction_isolation", level);
+                session.set_guc("transaction_isolation", level);
+            }
+            return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
+        }
+
+        // SET LOCAL var = value — transaction-scoped GUC override
+        if sql_lower.starts_with("set local ") {
+            let rest = sql_lower.trim_start_matches("set local ").trim();
+            if let Some((name, value)) = parse_set_command(rest) {
+                session.set_local_guc(&name, &value);
+            }
+            return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
+        }
+
+        // SET <var> = <value> / SET <var> TO <value> — store in session GUC
+        if sql_lower.starts_with("set ") {
+            if let Some((name, value)) = parse_set_command(sql_lower) {
+                session.set_guc(&name, &value);
+            }
+            return Some(vec![BackendMessage::CommandComplete { tag: "SET".into() }]);
+        }
+
+        // SAVEPOINT <name>
+        if sql_lower.starts_with("savepoint ") {
+            return Some(self.handle_savepoint(sql_lower, session));
+        }
+
+        // ROLLBACK TO [SAVEPOINT] <name>
+        if sql_lower.starts_with("rollback to ") {
+            return Some(self.handle_rollback_to(sql_lower, session));
+        }
+
+        // RELEASE [SAVEPOINT] <name>
+        if sql_lower.starts_with("release ") {
+            return Some(self.handle_release_savepoint(sql_lower, session));
+        }
+
+        // USE database — switch session to a different database
+        if sql_lower.starts_with("use ") {
+            let db_name = sql_lower.trim_start_matches("use ").trim().to_owned();
+            if db_name.is_empty() {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "USE requires a database name".into(),
+                }]);
+            }
+            let catalog = self.storage.get_catalog();
+            if let Some(db) = catalog.find_database(&db_name) {
+                let real_name = db.name.clone();
+                drop(catalog);
+                session.database = real_name;
+                return Some(vec![BackendMessage::CommandComplete { tag: "USE".into() }]);
+            } else {
+                drop(catalog);
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "3D000".into(),
+                    message: format!("database \"{db_name}\" does not exist"),
+                }]);
+            }
+        }
+
+        // DROP DATABASE [IF EXISTS] name
+        if sql_lower.starts_with("drop database ") {
+            let rest = sql_lower.trim_start_matches("drop database ").trim();
+            let (if_exists, db_name) = if rest.starts_with("if exists ") {
+                (
+                    true,
+                    rest.trim_start_matches("if exists ").trim().to_owned(),
+                )
+            } else {
+                (false, rest.to_owned())
+            };
+            if db_name.is_empty() {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "DROP DATABASE requires a database name".into(),
+                }]);
+            }
+            match self.storage.drop_database(&db_name) {
+                Ok(()) => {
+                    return Some(vec![BackendMessage::CommandComplete {
+                        tag: "DROP DATABASE".into(),
+                    }]);
+                }
+                Err(e) if if_exists => {
+                    return Some(vec![BackendMessage::CommandComplete {
+                        tag: "DROP DATABASE".into(),
+                    }]);
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "3D000".into(),
+                        message: format!("{e}"),
+                    }]);
+                }
+            }
+        }
+
+        // CREATE TENANT name [MAX_QPS n] [MAX_CONNECTIONS n] [MAX_STORAGE_BYTES n]
+        if sql_lower.starts_with("create tenant ") {
+            return Some(self.handle_create_tenant(sql_lower));
+        }
+
+        // DROP TENANT name
+        if sql_lower.starts_with("drop tenant ") {
+            return Some(self.handle_drop_tenant(sql_lower));
+        }
+
+        // SELECT falcon_tde_status()
+        if sql_lower.starts_with("select falcon_tde_status()") {
+            let status = self.storage.tde_status();
+            return Some(self.single_row_result(
+                vec![
+                    ("enabled", 16, -1),
+                    ("algorithm", 25, -1),
+                    ("dek_count", 23, -1),
+                    ("wal_encrypted", 16, -1),
+                ],
+                vec![vec![
+                    Some(status.enabled.to_string()),
+                    Some(status.algorithm),
+                    Some(status.dek_count.to_string()),
+                    Some(status.wal_encrypted.to_string()),
+                ]],
+            ));
+        }
+
+        // SELECT falcon_rotate_master_key('new_passphrase')
+        if sql_lower.starts_with("select falcon_rotate_master_key(") {
+            let passphrase = extract_string_arg(sql_lower, "select falcon_rotate_master_key(");
+            match self.storage.tde_rotate_master_key(&passphrase) {
+                Ok(()) => {
+                    return Some(self.single_row_result(
+                        vec![("falcon_rotate_master_key", 25, -1)],
+                        vec![vec![Some("OK".into())]],
+                    ));
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "XX000".into(),
+                        message: e,
+                    }]);
+                }
+            }
+        }
+
+        // SELECT falcon_generate_dek('scope')  — scope: wal | table_N | sst_N | backup
+        if sql_lower.starts_with("select falcon_generate_dek(") {
+            let scope_str = extract_string_arg(sql_lower, "select falcon_generate_dek(");
+            let scope = parse_encryption_scope(&scope_str);
+            match scope {
+                Some(s) => match self.storage.tde_generate_dek(s) {
+                    Ok(dek_id) => {
+                        return Some(self.single_row_result(
+                            vec![("falcon_generate_dek", 20, -1)],
+                            vec![vec![Some(dek_id.to_string())]],
+                        ));
+                    }
+                    Err(e) => {
+                        return Some(vec![BackendMessage::ErrorResponse {
+                            severity: "ERROR".into(),
+                            code: "XX000".into(),
+                            message: e,
+                        }]);
+                    }
+                },
+                None => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "42601".into(),
+                        message: format!(
+                            "invalid encryption scope: '{}' (use wal, table_N, sst_N, or backup)",
+                            scope_str
+                        ),
+                    }]);
+                }
+            }
+        }
+
+        // SELECT falcon_list_deks()
+        if sql_lower.starts_with("select falcon_list_deks()") {
+            let deks = self.storage.tde_list_deks();
+            if deks.is_empty() {
+                return Some(self.single_row_result(
+                    vec![
+                        ("id", 20, -1),
+                        ("label", 25, -1),
+                        ("active", 16, -1),
+                        ("created_at_ms", 20, -1),
+                    ],
+                    vec![],
+                ));
+            }
+            let rows: Vec<Vec<Option<String>>> = deks
+                .iter()
+                .map(|d| {
+                    vec![
+                        Some(d.id.to_string()),
+                        Some(d.label.clone()),
+                        Some(d.active.to_string()),
+                        Some(d.created_at_ms.to_string()),
+                    ]
+                })
+                .collect();
+            return Some(self.single_row_result(
+                vec![
+                    ("id", 20, -1),
+                    ("label", 25, -1),
+                    ("active", 16, -1),
+                    ("created_at_ms", 20, -1),
+                ],
+                rows,
+            ));
+        }
+
+        // SHOW ... queries
+        if sql_lower.starts_with("show ") {
+            let param = sql_lower.trim_start_matches("show ").trim();
+
+            if param == "all" {
+                return Some(self.handle_show_all(session));
+            }
+
+            // Delegate falcon.* SHOW commands to handler_show module
+            if param.starts_with("falcon.") {
+                if let Some(result) = self.handle_show_falcon(param, session) {
+                    return Some(result);
+                }
+            }
+
+            // Normalize multi-word SHOW params to underscore form
+            let normalized = match param {
+                "transaction isolation level" => "transaction_isolation",
+                "default transaction isolation" => "transaction_isolation",
+                "default transaction read only" => "default_transaction_read_only",
+                _ => param,
+            };
+            // Look up GUC variable from session, with hardcoded fallbacks
+            let value = session.get_guc(normalized).map_or_else(
+                || match normalized {
+                    "transaction_isolation" => "read committed".into(),
+                    "max_identifier_length" => "63".into(),
+                    "standard_conforming_strings" => "on".into(),
+                    "integer_datetimes" => "on".into(),
+                    "server_encoding" | "client_encoding" => "UTF8".into(),
+                    "datestyle" => "ISO, MDY".into(),
+                    _ => String::new(),
+                },
+                std::string::ToString::to_string,
+            );
+            return Some(
+                self.single_row_result(vec![(normalized, 25, -1)], vec![vec![Some(value)]]),
+            );
+        }
+
+        // SELECT * FROM pg_stat_statements
+        if sql_lower.contains("pg_stat_statements") && !sql_lower.contains("reset") {
+            let snap = self.observability.stmt_stats.snapshot();
+            let mut rows: Vec<Vec<Option<String>>> = snap
+                .iter()
+                .map(|(qid, query, calls, total, min, max, nrows)| {
+                    let mean = if *calls > 0 {
+                        *total as f64 / *calls as f64
+                    } else {
+                        0.0
+                    };
+                    vec![
+                        Some(qid.to_string()),
+                        Some(query.clone()),
+                        Some(calls.to_string()),
+                        Some(format!("{:.3}", *total as f64 / 1000.0)), // total_time ms
+                        Some(format!("{:.3}", *min as f64 / 1000.0)),   // min_time ms
+                        Some(format!("{:.3}", *max as f64 / 1000.0)),   // max_time ms
+                        Some(format!("{:.3}", mean / 1000.0)),          // mean_time ms
+                        Some(nrows.to_string()),
+                    ]
+                })
+                .collect();
+            rows.sort_by(|a, b| {
+                let ta: f64 = a[3].as_deref().unwrap_or("0").parse().unwrap_or(0.0);
+                let tb: f64 = b[3].as_deref().unwrap_or("0").parse().unwrap_or(0.0);
+                tb.partial_cmp(&ta).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            return Some(self.single_row_result(
+                vec![
+                    ("queryid", 20, 8),      // int8
+                    ("query", 25, -1),       // text
+                    ("calls", 20, 8),        // int8
+                    ("total_time", 701, -1), // float8 (ms)
+                    ("min_time", 701, -1),
+                    ("max_time", 701, -1),
+                    ("mean_time", 701, -1),
+                    ("rows", 20, 8),
+                ],
+                rows,
+            ));
+        }
+
+        // SELECT pg_stat_statements_reset()
+        if sql_lower.contains("pg_stat_statements_reset") {
+            self.observability.stmt_stats.reset();
+            return Some(self.single_row_result(
+                vec![("pg_stat_statements_reset", 25, -1)],
+                vec![vec![Some("".into())]],
+            ));
+        }
+
+        // pg_get_indexdef(oid [, col, pretty]) — return index DDL string
+        if sql_lower.contains("pg_get_indexdef(") {
+            let idx_oid: i64 = sql_lower.find("pg_get_indexdef(")
+                .and_then(|i| {
+                    let after = &sql_lower[i + "pg_get_indexdef(".len()..];
+                    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                    after[..end].parse::<i64>().ok()
+                })
+                .unwrap_or(0);
+            let ddl = if idx_oid > 0 {
+                // idx_oid range 90000+ assigned in handle_pg_index
+                let catalog = self.storage.get_catalog();
+                let mut result = String::new();
+                let mut fake_oid = 90000i64;
+                'outer: for t in catalog.list_tables() {
+                    if !t.primary_key_columns.is_empty() {
+                        if fake_oid == idx_oid {
+                            let cols: Vec<&str> = t.primary_key_columns.iter()
+                                .map(|&i| t.columns[i].name.as_str())
+                                .collect();
+                            result = format!("CREATE UNIQUE INDEX ON {} ({})", t.name, cols.join(", "));
+                            break 'outer;
+                        }
+                        fake_oid += 1;
+                    }
+                    for uc in &t.unique_constraints {
+                        if fake_oid == idx_oid {
+                            let cols: Vec<&str> = uc.iter().map(|&i| t.columns[i].name.as_str()).collect();
+                            result = format!("CREATE UNIQUE INDEX ON {} ({})", t.name, cols.join(", "));
+                            break 'outer;
+                        }
+                        fake_oid += 1;
+                    }
+                }
+                result
+            } else {
+                String::new()
+            };
+            return Some(self.single_row_result(
+                vec![("pg_get_indexdef", 25, -1)],
+                vec![vec![Some(ddl)]],
+            ));
+        }
+
+        // pg_get_constraintdef(oid [, pretty]) — return constraint DDL string
+        if sql_lower.contains("pg_get_constraintdef(") {
+            return Some(self.single_row_result(
+                vec![("pg_get_constraintdef", 25, -1)],
+                vec![vec![Some(String::new())]],
+            ));
+        }
+
+        // format_type(type_oid, typemod) — return SQL type name
+        if sql_lower.contains("format_type(") {
+            let type_name: String = if let Some(after) = sql_lower.find("format_type(").map(|i| i + "format_type(".len()) {
+                let args_str = &sql_lower[after..];
+                let end = args_str.find(')').unwrap_or(args_str.len());
+                let first_arg = args_str[..end].split(',').next().unwrap_or("").trim();
+                first_arg.parse::<i32>().ok().map(|oid: i32| {
+                    falcon_common::types::DataType::from_pg_oid(oid)
+                        .map(|dt| dt.pg_type_name().to_string())
+                        .unwrap_or_else(|| format!("type({})", oid))
+                }).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            return Some(self.single_row_result(
+                vec![("format_type", 25, -1)],
+                vec![vec![Some(type_name)]],
+            ));
+        }
+
+        // obj_description(oid [, catalog]) / col_description(table_oid, col_num) — return NULL (no comments stored)
+        if sql_lower.contains("obj_description(") || sql_lower.contains("col_description(") {
+            let col_name = if sql_lower.contains("col_description(") { "col_description" } else { "obj_description" };
+            return Some(self.single_row_result(
+                vec![(col_name, 25, -1)],
+                vec![vec![None]],
+            ));
+        }
+
+        // pg_encoding_to_char(encoding_id) — return encoding name
+        if sql_lower.contains("pg_encoding_to_char(") {
+            return Some(self.single_row_result(
+                vec![("pg_encoding_to_char", 25, -1)],
+                vec![vec![Some("UTF8".into())]],
+            ));
+        }
+
+        // pg_get_expr(adbin, adrelid [, pretty]) — return default expression string
+        if sql_lower.contains("pg_get_expr(") {
+            return Some(self.single_row_result(
+                vec![("pg_get_expr", 25, -1)],
+                vec![vec![None]],
+            ));
+        }
+
+        // pg_get_serial_sequence(table, column) — return sequence name
+        if sql_lower.contains("pg_get_serial_sequence(") {
+            let catalog = self.storage.get_catalog();
+            let result: Option<String> = (|| {
+                let after = sql_lower.find("pg_get_serial_sequence(")? + "pg_get_serial_sequence(".len();
+                let args_str = &sql_lower[after..];
+                let end = args_str.find(')')?;
+                let parts: Vec<&str> = args_str[..end].split(',').collect();
+                let table = parts.first()?.trim().trim_matches('\'').trim_matches('"');
+                let col = parts.get(1)?.trim().trim_matches('\'').trim_matches('"');
+                let schema = catalog.find_table(table)?;
+                if schema.columns.iter().any(|c| c.name.to_lowercase() == col && c.is_serial) {
+                    Some(format!("public.{}_{}_seq", table, col))
+                } else {
+                    None
+                }
+            })();
+            return Some(self.single_row_result(
+                vec![("pg_get_serial_sequence", 25, -1)],
+                vec![vec![result]],
+            ));
+        }
+
+        // Delegate information_schema and pg_catalog queries to handler_catalog module
+        if let Some(result) = self.handle_catalog_query(sql_lower, session) {
+            return Some(result);
+        }
+
+        // PREPARE TRANSACTION 'gid'
+        if sql_lower.starts_with("prepare transaction ") {
+            let gid = sql[19..]
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"')
+                .to_owned();
+            if gid.is_empty() {
+                return Some(vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "PREPARE TRANSACTION requires a transaction identifier".into(),
+                }]);
+            }
+            let txn = match session.txn.as_ref() {
+                Some(t) => t,
+                None => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "25P01".into(),
+                        message: "there is no transaction in progress".into(),
+                    }]);
+                }
+            };
+            match self.txn_mgr.prepare_named(txn.txn_id, gid) {
+                Ok(()) => {
+                    session.txn = None;
+                    session.autocommit = true;
+                    return Some(vec![BackendMessage::CommandComplete {
+                        tag: "PREPARE TRANSACTION".into(),
+                    }]);
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "55000".into(),
+                        message: format!("{e}"),
+                    }]);
+                }
+            }
+        }
+
+        // COMMIT PREPARED 'gid'
+        if sql_lower.starts_with("commit prepared ") {
+            let gid = sql[16..]
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"');
+            match self.txn_mgr.commit_prepared(gid) {
+                Ok(_ts) => {
+                    return Some(vec![BackendMessage::CommandComplete {
+                        tag: "COMMIT PREPARED".into(),
+                    }]);
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "42704".into(),
+                        message: format!("{e}"),
+                    }]);
+                }
+            }
+        }
+
+        // ROLLBACK PREPARED 'gid'
+        if sql_lower.starts_with("rollback prepared ") {
+            let gid = sql[18..]
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"');
+            match self.txn_mgr.rollback_prepared(gid) {
+                Ok(()) => {
+                    return Some(vec![BackendMessage::CommandComplete {
+                        tag: "ROLLBACK PREPARED".into(),
+                    }]);
+                }
+                Err(e) => {
+                    return Some(vec![BackendMessage::ErrorResponse {
+                        severity: "ERROR".into(),
+                        code: "42704".into(),
+                        message: format!("{e}"),
+                    }]);
+                }
+            }
+        }
+
+        // PREPARE name [(type, ...)] AS query
+        if sql_lower.starts_with("prepare ") {
+            if let Some((name, query)) = parse_prepare_statement(sql) {
+                // Try plan-based path (same as extended query Parse)
+                let (plan, inferred_param_types, row_desc) = match self.prepare_statement(&query) {
+                    Ok((p, ipt, rd)) => (Some(std::sync::Arc::new(p)), ipt, rd),
+                    Err(_) => (None, vec![], vec![]),
+                };
+                let param_types = inferred_param_types
+                    .iter()
+                    .map(|t| self.datatype_to_oid(t.as_ref()))
+                    .collect();
+                session.prepared_statements.insert(
+                    name,
+                    crate::session::PreparedStatement {
+                        query,
+                        param_types,
+                        plan,
+                        inferred_param_types,
+                        row_desc,
+                    },
+                );
+                falcon_observability::record_prepared_stmt_sql_cmd("prepare");
+                falcon_observability::record_prepared_stmt_active(
+                    session.prepared_statements.len(),
+                );
+                return Some(vec![BackendMessage::CommandComplete {
+                    tag: "PREPARE".into(),
+                }]);
+            }
+            return Some(vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "invalid PREPARE syntax".into(),
+            }]);
+        }
+
+        // EXECUTE name [(param, ...)]
+        if sql_lower.starts_with("execute ") {
+            if let Some((name, params)) = parse_execute_statement(sql) {
+                // Look up the prepared statement
+                let ps = match session.prepared_statements.get(&name) {
+                    Some(ps) => ps.clone(),
+                    None => {
+                        return Some(vec![BackendMessage::ErrorResponse {
+                            severity: "ERROR".into(),
+                            code: "26000".into(),
+                            message: format!("prepared statement \"{name}\" does not exist"),
+                        }]);
+                    }
+                };
+                falcon_observability::record_prepared_stmt_sql_cmd("execute");
+                // Plan-based path: convert text params to typed Datum, execute plan
+                if let Some(ref plan) = ps.plan {
+                    let datum_params = text_params_to_datum(&params, &ps.inferred_param_types);
+                    return Some(self.execute_plan(plan, &datum_params, session));
+                }
+                // Legacy fallback: text substitution
+                let bound = bind_params(&ps.query, &params);
+                return Some(self.handle_query(&bound, session));
+            }
+        }
+
+        // DISCARD ALL (psql sends this on reconnect sometimes)
+        if sql_lower == "discard all" {
+            session.reset_all_gucs();
+            session.prepared_statements.clear();
+            session.portals.clear();
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "DISCARD ALL".into(),
+            }]);
+        }
+
+        // DEALLOCATE [ALL | name]
+        if sql_lower.starts_with("deallocate") {
+            let rest = sql_lower
+                .trim_start_matches("deallocate")
+                .trim()
+                .trim_end_matches(';')
+                .trim();
+            if rest == "all" {
+                session.prepared_statements.clear();
+            } else if !rest.is_empty() {
+                session.prepared_statements.remove(rest);
+            }
+            falcon_observability::record_prepared_stmt_sql_cmd("deallocate");
+            falcon_observability::record_prepared_stmt_active(session.prepared_statements.len());
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "DEALLOCATE".into(),
+            }]);
+        }
+
+        // RESET [ALL | var]
+        if sql_lower.starts_with("reset ") {
+            let var = sql_lower
+                .trim_start_matches("reset ")
+                .trim()
+                .trim_end_matches(';')
+                .trim();
+            if var == "all" {
+                session.reset_all_gucs();
+            } else {
+                session.reset_guc(var);
+            }
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "RESET".into(),
+            }]);
+        }
+
+        // ── LISTEN channel ──
+        if sql_lower.starts_with("listen ") {
+            let channel = sql_lower
+                .trim_start_matches("listen ")
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .to_owned();
+            if !channel.is_empty() {
+                session
+                    .notifications
+                    .listen(&channel, &session.notification_hub);
+            }
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "LISTEN".into(),
+            }]);
+        }
+
+        // ── UNLISTEN channel | UNLISTEN * ──
+        if sql_lower.starts_with("unlisten ") {
+            let channel = sql_lower
+                .trim_start_matches("unlisten ")
+                .trim()
+                .trim_end_matches(';')
+                .trim();
+            if channel == "*" {
+                session
+                    .notifications
+                    .unlisten_all(&session.notification_hub);
+            } else {
+                session
+                    .notifications
+                    .unlisten(channel, &session.notification_hub);
+            }
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "UNLISTEN".into(),
+            }]);
+        }
+
+        // ── NOTIFY channel [, 'payload'] ──
+        if sql_lower.starts_with("notify ") {
+            let rest = sql
+                .trim_start_matches(|c: char| c.is_alphabetic() || c == ' ')
+                .trim_end_matches(';')
+                .trim();
+            // rest is now "channel" or "channel, 'payload'"
+            let (channel, payload) = rest.find(',').map_or_else(
+                || (rest.trim().to_lowercase(), String::new()),
+                |comma_pos| {
+                    let ch = rest[..comma_pos].trim().to_lowercase();
+                    let pl = rest[comma_pos + 1..].trim().trim_matches('\'').to_owned();
+                    (ch, pl)
+                },
+            );
+            if !channel.is_empty() {
+                session
+                    .notification_hub
+                    .notify(&channel, session.id, &payload);
+            }
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "NOTIFY".into(),
+            }]);
+        }
+
+        // ── DECLARE cursor_name [NO SCROLL] CURSOR [WITH HOLD] FOR query ──
+        if sql_lower.starts_with("declare ") {
+            return Some(self.handle_declare_cursor(sql, sql_lower, session));
+        }
+
+        // ── FETCH [count] FROM cursor_name ──
+        if sql_lower.starts_with("fetch ") {
+            return Some(self.handle_fetch_cursor(sql_lower, session));
+        }
+
+        // ── MOVE [count] FROM cursor_name ──
+        if sql_lower.starts_with("move ") {
+            return Some(self.handle_move_cursor(sql_lower, session));
+        }
+
+        // ── CLOSE cursor_name | CLOSE ALL ──
+        if sql_lower.starts_with("close ") {
+            let rest = sql_lower.trim_start_matches("close ").trim();
+            if rest == "all" {
+                session.cursors.clear();
+            } else {
+                session.cursors.remove(rest);
+            }
+            return Some(vec![BackendMessage::CommandComplete {
+                tag: "CLOSE CURSOR".into(),
+            }]);
+        }
+
+        // ── BACKUP DATABASE TO 'dest' [INCREMENTAL] [LABEL 'label'] ──
+        if sql_lower.starts_with("backup ") {
+            return Some(self.handle_backup_command(sql_lower, session));
+        }
+
+        // ── RESTORE DATABASE FROM 'src' ──
+        if sql_lower.starts_with("restore ") {
+            return Some(self.handle_restore_command(sql_lower, session));
+        }
+
+        // ── CREATE JOB name EVERY <n> SECONDS AS BACKUP TO 'dest' ──
+        if sql_lower.starts_with("create job ") {
+            return Some(self.handle_create_job(sql_lower, session));
+        }
+
+        // ── DROP JOB <id> ──
+        if sql_lower.starts_with("drop job ") {
+            return Some(self.handle_drop_job(sql_lower, session));
+        }
+
+        // ── CDC commands ──
+        if let Some(result) = self.handle_cdc_command(sql_lower) {
+            return Some(result);
+        }
+
+        None
+    }
+
+    fn handle_backup_command(
+        &self,
+        sql_lower: &str,
+        _session: &mut PgSession,
+    ) -> Vec<BackendMessage> {
+        // BACKUP DATABASE TO 'dest' [INCREMENTAL] [LABEL 'label']
+        // BACKUP TO 'dest' [INCREMENTAL] [LABEL 'label']
+        let rest = sql_lower
+            .trim_start_matches("backup database to ")
+            .trim_start_matches("backup to ");
+        let incremental = rest.contains(" incremental");
+        let label = if let Some(pos) = rest.find("label '") {
+            let after = &rest[pos + 7..];
+            after.find('\'').map_or("", |end| &after[..end]).to_owned()
+        } else {
+            String::new()
+        };
+        let dest = rest
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('\'')
+            .to_owned();
+        if dest.is_empty() {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "BACKUP requires a destination directory".into(),
+            }];
+        }
+        let result = if incremental {
+            self.storage.backup_incremental(&dest, &label)
+        } else {
+            self.storage.backup_full(&dest, &label)
+        };
+        match result {
+            Ok(backup_id) => self.single_row_result(
+                vec![("backup_id", 20, 8), ("status", 25, -1)],
+                vec![vec![Some(backup_id.to_string()), Some("completed".into())]],
+            ),
+            Err(e) => vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "XX000".into(),
+                message: format!("BACKUP failed: {e}"),
+            }],
+        }
+    }
+
+    fn handle_restore_command(
+        &self,
+        sql_lower: &str,
+        _session: &mut PgSession,
+    ) -> Vec<BackendMessage> {
+        // RESTORE DATABASE FROM 'src'
+        // RESTORE FROM 'src'
+        let src = sql_lower
+            .trim_start_matches("restore database from ")
+            .trim_start_matches("restore from ")
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('\'')
+            .to_owned();
+        if src.is_empty() {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "RESTORE requires a source directory".into(),
+            }];
+        }
+        match self.storage.restore_from_backup(&src) {
+            Ok(rows) => self.single_row_result(
+                vec![("rows_restored", 20, 8)],
+                vec![vec![Some(rows.to_string())]],
+            ),
+            Err(e) => vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "XX000".into(),
+                message: format!("RESTORE failed: {e}"),
+            }],
+        }
+    }
+
+    fn handle_create_job(&self, sql_lower: &str, _session: &mut PgSession) -> Vec<BackendMessage> {
+        // CREATE JOB name EVERY <n> SECONDS AS BACKUP TO 'dest'
+        use falcon_storage::backup::BackupType;
+        use std::sync::Arc;
+        let rest = sql_lower.trim_start_matches("create job ").trim();
+        let parts: Vec<&str> = rest.splitn(2, " every ").collect();
+        if parts.len() < 2 {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "CREATE JOB syntax: CREATE JOB name EVERY <n> SECONDS AS BACKUP TO 'dest'"
+                    .into(),
+            }];
+        }
+        let job_name = parts[0].trim().to_owned();
+        let after_every = parts[1].trim();
+        // parse <n> SECONDS AS BACKUP [INCREMENTAL] TO 'dest'
+        let (interval_secs, tail) = {
+            let mut sp = after_every.splitn(2, char::is_whitespace);
+            let n: u64 = sp.next().unwrap_or("0").parse().unwrap_or(0);
+            let tail = sp.next().unwrap_or("").trim();
+            (n, tail)
+        };
+        let tail = tail
+            .trim_start_matches("seconds as ")
+            .trim_start_matches("second as ");
+        let incremental = tail.contains("incremental");
+        let dest = tail
+            .trim_start_matches("backup incremental to ")
+            .trim_start_matches("backup to ")
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('\'')
+            .to_owned();
+        if interval_secs == 0 || dest.is_empty() {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "CREATE JOB requires a positive interval and a destination".into(),
+            }];
+        }
+        let btype = if incremental {
+            BackupType::Incremental
+        } else {
+            BackupType::Full
+        };
+        let arc_engine: Arc<falcon_storage::engine::StorageEngine> = Arc::clone(&self.storage);
+        let job_id = arc_engine.schedule_recurring_backup(
+            btype,
+            dest.clone(),
+            job_name.clone(),
+            interval_secs,
+        );
+        self.single_row_result(
+            vec![
+                ("job_id", 20, 8),
+                ("name", 25, -1),
+                ("interval_secs", 20, 8),
+            ],
+            vec![vec![
+                Some(job_id.to_string()),
+                Some(job_name),
+                Some(interval_secs.to_string()),
+            ]],
+        )
+    }
+
+    fn handle_drop_job(&self, sql_lower: &str, _session: &mut PgSession) -> Vec<BackendMessage> {
+        let rest = sql_lower.trim_start_matches("drop job ").trim();
+        let job_id: u64 = rest.trim_end_matches(';').trim().parse().unwrap_or(0);
+        let cancelled = self.storage.cancel_job(job_id);
+        self.single_row_result(
+            vec![("cancelled", 16, 1)],
+            vec![vec![Some(if cancelled { "t" } else { "f" }.into())]],
+        )
+    }
+
+    // ── Savepoint helpers ──
+
+    fn handle_savepoint(&self, sql_lower: &str, session: &mut PgSession) -> Vec<BackendMessage> {
+        let name = sql_lower.trim_start_matches("savepoint ").trim().to_owned();
+        if !session.in_transaction() {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "25P01".into(),
+                message: "SAVEPOINT can only be used in transaction blocks".into(),
+            }];
+        }
+        let txn_id = match session.txn.as_ref() {
+            Some(t) => t.txn_id,
+            None => {
+                return vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "25P01".into(),
+                    message: "SAVEPOINT requires an active transaction".into(),
+                }]
+            }
+        };
+        let write_set_len = self.storage.write_set_snapshot(txn_id);
+        let read_set_len = self.storage.read_set_snapshot(txn_id);
+        session.savepoints.push(crate::session::SavepointEntry {
+            name,
+            write_set_len,
+            read_set_len,
+        });
+        vec![BackendMessage::CommandComplete {
+            tag: "SAVEPOINT".into(),
+        }]
+    }
+
+    fn handle_rollback_to(&self, sql_lower: &str, session: &mut PgSession) -> Vec<BackendMessage> {
+        let rest = sql_lower.trim_start_matches("rollback to ").trim();
+        let name = rest.strip_prefix("savepoint ").unwrap_or(rest).trim();
+        if let Some(pos) = session.savepoints.iter().rposition(|sp| sp.name == name) {
+            let write_snap = session.savepoints[pos].write_set_len;
+            let read_snap = session.savepoints[pos].read_set_len;
+            if let Some(ref txn) = session.txn {
+                self.storage
+                    .rollback_write_set_after(txn.txn_id, write_snap);
+                self.storage.rollback_read_set_after(txn.txn_id, read_snap);
+            }
+            session.savepoints.truncate(pos + 1);
+            vec![BackendMessage::CommandComplete {
+                tag: "ROLLBACK".into(),
+            }]
+        } else {
+            vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "3B001".into(),
+                message: format!("savepoint \"{name}\" does not exist"),
+            }]
+        }
+    }
+
+    fn handle_release_savepoint(
+        &self,
+        sql_lower: &str,
+        session: &mut PgSession,
+    ) -> Vec<BackendMessage> {
+        let rest = sql_lower.trim_start_matches("release ").trim();
+        let name = rest.strip_prefix("savepoint ").unwrap_or(rest).trim();
+        if let Some(pos) = session.savepoints.iter().rposition(|sp| sp.name == name) {
+            session.savepoints.remove(pos);
+            vec![BackendMessage::CommandComplete {
+                tag: "RELEASE".into(),
+            }]
+        } else {
+            vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "3B001".into(),
+                message: format!("savepoint \"{name}\" does not exist"),
+            }]
+        }
+    }
+
+    // ── Tenant helpers ──
+
+    fn handle_create_tenant(&self, sql_lower: &str) -> Vec<BackendMessage> {
+        let rest = sql_lower.trim_start_matches("create tenant ").trim();
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if parts.is_empty() {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "CREATE TENANT requires a tenant name".into(),
+            }];
+        }
+        let tenant_name = parts[0].to_owned();
+        let mut max_qps = 0u64;
+        let mut max_storage_bytes = 0u64;
+        let mut i = 1;
+        while i + 1 < parts.len() {
+            match parts[i] {
+                "max_qps" => {
+                    max_qps = parts[i + 1].parse().unwrap_or(0);
+                    i += 2;
+                }
+                "max_storage_bytes" => {
+                    max_storage_bytes = parts[i + 1].parse().unwrap_or(0);
+                    i += 2;
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+        let tenant_id = self.enterprise.tenant_registry.alloc_tenant_id();
+        let mut config = falcon_common::tenant::TenantConfig::new(tenant_id, tenant_name.clone());
+        config.quota.max_qps = max_qps;
+        config.quota.max_storage_bytes = max_storage_bytes;
+        if self.enterprise.tenant_registry.register_tenant(config) {
+            vec![BackendMessage::CommandComplete {
+                tag: format!("CREATE TENANT {tenant_name}"),
+            }]
+        } else {
+            vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42710".into(),
+                message: format!("tenant \"{tenant_name}\" already exists"),
+            }]
+        }
+    }
+
+    fn handle_drop_tenant(&self, sql_lower: &str) -> Vec<BackendMessage> {
+        let tenant_name = sql_lower
+            .trim_start_matches("drop tenant ")
+            .trim()
+            .to_owned();
+        let found = self
+            .enterprise
+            .tenant_registry
+            .tenant_ids()
+            .into_iter()
+            .find(|tid| {
+                self.enterprise
+                    .tenant_registry
+                    .get_config(*tid)
+                    .is_some_and(|c| c.name == tenant_name)
+            });
+        found.map_or_else(
+            || {
+                vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42704".into(),
+                    message: format!("tenant \"{tenant_name}\" does not exist"),
+                }]
+            },
+            |tid| {
+                self.enterprise.tenant_registry.remove_tenant(tid);
+                vec![BackendMessage::CommandComplete {
+                    tag: format!("DROP TENANT {tenant_name}"),
+                }]
+            },
+        )
+    }
+
+    // ── CDC command dispatch ──
+
+    fn handle_cdc_command(&self, sql_lower: &str) -> Option<Vec<BackendMessage>> {
+        if sql_lower.starts_with("create replication slot ") {
+            let name = sql_lower
+                .trim_start_matches("create replication slot ")
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .trim_matches('\'')
+                .to_owned();
+            return Some(match self.storage.cdc_create_slot(&name) {
+                Ok(slot_id) => self.single_row_result(
+                    vec![
+                        ("slot_name", 25, -1),
+                        ("slot_id", 20, 8),
+                        ("restart_lsn", 25, -1),
+                    ],
+                    vec![vec![
+                        Some(name),
+                        Some(slot_id.to_string()),
+                        Some("0/0".into()),
+                    ]],
+                ),
+                Err(e) => vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "55000".into(),
+                    message: e,
+                }],
+            });
+        }
+
+        if sql_lower.starts_with("drop replication slot ") {
+            let name = sql_lower
+                .trim_start_matches("drop replication slot ")
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .trim_matches('\'')
+                .to_owned();
+            return Some(match self.storage.cdc_drop_slot(&name) {
+                Ok(()) => vec![BackendMessage::CommandComplete {
+                    tag: "DROP REPLICATION SLOT".into(),
+                }],
+                Err(e) => vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "55000".into(),
+                    message: e,
+                }],
+            });
+        }
+
+        if sql_lower.starts_with("select falcon_cdc_status()") {
+            let s = self.storage.cdc_status();
+            return Some(self.single_row_result(
+                vec![
+                    ("enabled", 16, -1),
+                    ("slot_count", 23, 4),
+                    ("buffer_len", 23, 4),
+                    ("events_emitted", 20, 8),
+                    ("events_evicted", 20, 8),
+                    ("bridge_lsn", 20, 8),
+                    ("inflight_txns", 23, 4),
+                ],
+                vec![vec![
+                    Some(if s.enabled { "t" } else { "f" }.into()),
+                    Some(s.slot_count.to_string()),
+                    Some(s.buffer_len.to_string()),
+                    Some(s.events_emitted.to_string()),
+                    Some(s.events_evicted.to_string()),
+                    Some(s.bridge_lsn.to_string()),
+                    Some(s.inflight_txns.to_string()),
+                ]],
+            ));
+        }
+
+        if sql_lower.starts_with("select falcon_list_slots()") {
+            let slots = self.storage.cdc_list_slots();
+            let rows: Vec<Vec<Option<String>>> = slots
+                .iter()
+                .map(|s| {
+                    vec![
+                        Some(s.id.0.to_string()),
+                        Some(s.name.clone()),
+                        Some(if s.active { "t" } else { "f" }.into()),
+                        Some(s.confirmed_flush_lsn.0.to_string()),
+                        Some(s.restart_lsn.0.to_string()),
+                        Some(s.created_at_ms.to_string()),
+                    ]
+                })
+                .collect();
+            return Some(self.single_row_result(
+                vec![
+                    ("slot_id", 20, 8),
+                    ("slot_name", 25, -1),
+                    ("active", 16, -1),
+                    ("confirmed_flush_lsn", 20, 8),
+                    ("restart_lsn", 20, 8),
+                    ("created_at_ms", 20, 8),
+                ],
+                rows,
+            ));
+        }
+
+        if sql_lower.starts_with("select falcon_cdc_poll(") {
+            let inner = sql_lower
+                .trim_start_matches("select falcon_cdc_poll(")
+                .trim_end_matches(')')
+                .trim_end_matches(';')
+                .trim();
+            let parts: Vec<&str> = inner.splitn(2, ',').collect();
+            let slot_name = parts[0].trim().trim_matches('\'').to_owned();
+            let max_events: usize = parts
+                .get(1)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(100);
+            return Some(match self.storage.cdc_poll(&slot_name, max_events) {
+                Ok(events) => {
+                    let rows: Vec<Vec<Option<String>>> = events
+                        .iter()
+                        .map(|e| {
+                            vec![
+                                Some(e.seq.to_string()),
+                                Some(e.lsn.0.to_string()),
+                                Some(e.txn_id.0.to_string()),
+                                Some(e.op.to_string()),
+                                Some(e.table_name.clone().unwrap_or_default()),
+                                Some(e.timestamp_ms.to_string()),
+                                e.pk_values.clone(),
+                                e.new_row.as_ref().map(|r| format!("{r:?}")),
+                                e.old_row.as_ref().map(|r| format!("{r:?}")),
+                                e.ddl_text.clone(),
+                            ]
+                        })
+                        .collect();
+                    self.single_row_result(
+                        vec![
+                            ("seq", 20, 8),
+                            ("lsn", 20, 8),
+                            ("txn_id", 20, 8),
+                            ("op", 25, -1),
+                            ("table_name", 25, -1),
+                            ("timestamp_ms", 20, 8),
+                            ("pk_values", 25, -1),
+                            ("new_row", 25, -1),
+                            ("old_row", 25, -1),
+                            ("ddl_text", 25, -1),
+                        ],
+                        rows,
+                    )
+                }
+                Err(e) => vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "55000".into(),
+                    message: e,
+                }],
+            });
+        }
+
+        if sql_lower.starts_with("select falcon_cdc_advance(") {
+            let inner = sql_lower
+                .trim_start_matches("select falcon_cdc_advance(")
+                .trim_end_matches(')')
+                .trim_end_matches(';')
+                .trim();
+            let parts: Vec<&str> = inner.splitn(2, ',').collect();
+            let slot_name = parts[0].trim().trim_matches('\'').to_owned();
+            let lsn: u64 = parts
+                .get(1)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            return Some(match self.storage.cdc_advance_slot(&slot_name, lsn) {
+                Ok(()) => self.single_row_result(
+                    vec![("falcon_cdc_advance", 25, -1)],
+                    vec![vec![Some("OK".into())]],
+                ),
+                Err(e) => vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "55000".into(),
+                    message: e,
+                }],
+            });
+        }
+
+        None
+    }
+
+    // ── Cursor helpers ──
+
+    /// Handle DECLARE cursor_name [NO SCROLL] CURSOR [WITH HOLD] FOR query
+    fn handle_declare_cursor(
+        &self,
+        sql: &str,
+        sql_lower: &str,
+        session: &mut PgSession,
+    ) -> Vec<BackendMessage> {
+        // Parse: DECLARE name [NO SCROLL] CURSOR [WITH HOLD] FOR <query>
+        let rest = sql_lower.trim_start_matches("declare ").trim();
+        let parts: Vec<&str> = rest.splitn(2, " cursor").collect();
+        if parts.len() < 2 {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "syntax error in DECLARE CURSOR".into(),
+            }];
+        }
+
+        let cursor_name = parts[0].trim_end_matches(" no scroll").trim().to_owned();
+        let with_hold = parts[1].contains("with hold");
+
+        // Extract the FOR query
+        let for_pos = rest.find(" for ");
+        if for_pos.is_none() {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "DECLARE CURSOR requires FOR <query>".into(),
+            }];
+        }
+        let for_idx = match for_pos {
+            Some(i) => i,
+            None => {
+                return vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "42601".into(),
+                    message: "DECLARE CURSOR: FOR position not found".into(),
+                }]
+            }
+        };
+        // Get the original-case SQL for the query portion
+        let declare_prefix_len = "declare ".len();
+        let query_start = declare_prefix_len + for_idx + " for ".len();
+        let query = if query_start < sql.len() {
+            sql[query_start..].trim().trim_end_matches(';').to_owned()
+        } else {
+            return vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42601".into(),
+                message: "empty query in DECLARE CURSOR".into(),
+            }];
+        };
+
+        // Execute the query and store results in a streaming cursor.
+        // The query is executed now but rows are served in chunks via FETCH.
+        let txn = session.txn.as_ref();
+        match self.execute_sql_for_cursor(&query, txn) {
+            Ok((columns, rows)) => {
+                let stream =
+                    falcon_executor::CursorStream::new_materialized(columns, rows, with_hold);
+                session.cursors.insert(
+                    cursor_name.clone(),
+                    crate::session::CursorState {
+                        name: cursor_name,
+                        stream,
+                    },
+                );
+                vec![BackendMessage::CommandComplete {
+                    tag: "DECLARE CURSOR".into(),
+                }]
+            }
+            Err(msg) => vec![BackendMessage::ErrorResponse {
+                severity: "ERROR".into(),
+                code: "42P03".into(),
+                message: msg,
+            }],
+        }
+    }
+
+    /// Execute a SQL query and return (columns, rows) for cursor materialization.
+    #[allow(clippy::type_complexity)]
+    fn execute_sql_for_cursor(
+        &self,
+        query: &str,
+        txn: Option<&falcon_txn::TxnHandle>,
+    ) -> Result<
+        (
+            Vec<(String, falcon_common::types::DataType)>,
+            Vec<falcon_common::datum::OwnedRow>,
+        ),
+        String,
+    > {
+        let catalog = self.storage.get_catalog();
+        let mut binder = Binder::new(catalog);
+        let stmts = parse_sql(query).map_err(|e| format!("parse error: {e}"))?;
+        if stmts.is_empty() {
+            return Err("empty query".into());
+        }
+        let bound = binder
+            .bind(&stmts[0])
+            .map_err(|e| format!("bind error: {e}"))?;
+        let plan = Planner::plan(&bound).map_err(|e| format!("plan error: {e}"))?;
+        let result = self
+            .executor
+            .execute(&plan, txn)
+            .map_err(|e| format!("exec error: {e}"))?;
+        match result {
+            falcon_executor::ExecutionResult::Query { columns, rows } => Ok((columns, rows)),
+            _ => Err("DECLARE CURSOR requires a SELECT query".into()),
+        }
+    }
+
+    /// Handle FETCH [count] FROM cursor_name
+    fn handle_fetch_cursor(&self, sql_lower: &str, session: &mut PgSession) -> Vec<BackendMessage> {
+        let rest = sql_lower.trim_start_matches("fetch ").trim();
+
+        // Parse: FETCH [NEXT | FORWARD | count] [FROM | IN] cursor_name
+        let (count, cursor_name) = Self::parse_fetch_args(rest);
+
+        let cursor = match session.cursors.get_mut(&cursor_name) {
+            Some(c) => c,
+            None => {
+                return vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "34000".into(),
+                    message: format!("cursor \"{cursor_name}\" does not exist"),
+                }]
+            }
+        };
+
+        // Build field descriptions from the stream's column metadata
+        let fields: Vec<FieldDescription> = cursor
+            .stream
+            .columns()
+            .iter()
+            .map(|(name, dt)| {
+                let (type_oid, type_len) = Self::data_type_to_pg_oid(dt);
+                FieldDescription {
+                    name: name.clone(),
+                    table_oid: 0,
+                    column_attr: 0,
+                    type_oid,
+                    type_len,
+                    type_modifier: -1,
+                    format_code: 0,
+                }
+            })
+            .collect();
+
+        let mut msgs = vec![BackendMessage::RowDescription { fields }];
+
+        // Fetch up to `count` rows via streaming cursor
+        let batch = cursor.stream.next_batch(count).unwrap_or_default();
+        let fetched = batch.len();
+        for row in &batch {
+            let row_vals: Vec<Option<String>> = row
+                .values
+                .iter()
+                .map(|d| {
+                    if d.is_null() {
+                        None
+                    } else {
+                        Some(format!("{d}"))
+                    }
+                })
+                .collect();
+            msgs.push(BackendMessage::DataRow { values: row_vals });
+        }
+
+        msgs.push(BackendMessage::CommandComplete {
+            tag: format!("FETCH {fetched}"),
+        });
+        msgs
+    }
+
+    /// Parse FETCH arguments: [NEXT | FORWARD | ALL | count] [FROM | IN] cursor_name
+    fn parse_fetch_args(rest: &str) -> (usize, String) {
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        match tokens.len() {
+            1 => (1, tokens[0].to_owned()),
+            2 => {
+                if tokens[0] == "from"
+                    || tokens[0] == "in"
+                    || tokens[0] == "next"
+                    || tokens[0] == "forward"
+                {
+                    (1, tokens[1].to_owned())
+                } else if tokens[0] == "all" {
+                    (usize::MAX, tokens[1].to_owned())
+                } else if let Ok(n) = tokens[0].parse::<usize>() {
+                    (n, tokens[1].to_owned())
+                } else {
+                    (1, tokens[0].to_owned())
+                }
+            }
+            3.. => {
+                // Try: count FROM name / FORWARD count FROM name / NEXT FROM name
+                let first = tokens[0];
+                let last_token = tokens.last().copied().unwrap_or("").to_owned();
+                if first == "next" || first == "forward" {
+                    let count = tokens
+                        .get(1)
+                        .and_then(|t| t.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    (count, last_token)
+                } else if first == "all" {
+                    (usize::MAX, last_token)
+                } else if let Ok(n) = first.parse::<usize>() {
+                    (n, last_token)
+                } else {
+                    (1, last_token)
+                }
+            }
+            _ => (1, String::new()),
+        }
+    }
+
+    /// Parse MOVE arguments: [BACKWARD | FORWARD] [count | ALL] [FROM | IN] cursor_name
+    /// Returns (count, cursor_name, backward).
+    fn parse_move_args(rest: &str) -> (usize, String, bool) {
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        let mut backward = false;
+        let mut count = 1usize;
+        let mut cursor_name = String::new();
+
+        let mut i = 0;
+        if i < tokens.len() && tokens[i] == "backward" {
+            backward = true;
+            i += 1;
+        } else if i < tokens.len() && tokens[i] == "forward" {
+            i += 1;
+        }
+
+        if i < tokens.len() {
+            if tokens[i] == "all" {
+                count = usize::MAX;
+                i += 1;
+            } else if let Ok(n) = tokens[i].parse::<usize>() {
+                count = n;
+                i += 1;
+            }
+        }
+
+        // Skip FROM/IN
+        if i < tokens.len() && (tokens[i] == "from" || tokens[i] == "in") {
+            i += 1;
+        }
+
+        if i < tokens.len() {
+            cursor_name = tokens[i].to_owned();
+        }
+
+        (count, cursor_name, backward)
+    }
+
+    /// Map DataType to PG OID and type_len for cursor column descriptions.
+    const fn data_type_to_pg_oid(dt: &falcon_common::types::DataType) -> (i32, i16) {
+        use falcon_common::types::DataType;
+        match dt {
+            DataType::Int32 => (23, 4),            // int4
+            DataType::Int64 => (20, 8),            // int8
+            DataType::Float64 => (701, 8),         // float8
+            DataType::Text => (25, -1),            // text
+            DataType::Boolean => (16, 1),          // bool
+            DataType::Timestamp => (1114, 8),      // timestamp
+            DataType::Date => (1082, 4),           // date
+            DataType::Decimal(_, _) => (1700, -1), // numeric
+            DataType::Time => (1083, 8),           // time
+            DataType::Interval => (1186, 16),      // interval
+            DataType::Uuid => (2950, 16),          // uuid
+            DataType::Bytea => (17, -1),           // bytea
+            DataType::Jsonb => (3802, -1),         // jsonb
+            _ => (25, -1),                         // fallback to text
+        }
+    }
+
+    fn handle_move_cursor(&self, sql_lower: &str, session: &mut PgSession) -> Vec<BackendMessage> {
+        let rest = sql_lower.trim_start_matches("move ").trim();
+        let (count, cursor_name, backward) = Self::parse_move_args(rest);
+        match session.cursors.get_mut(&cursor_name) {
+            Some(cursor) => {
+                let moved = if backward {
+                    cursor.stream.retreat(count)
+                } else {
+                    cursor.stream.advance(count)
+                };
+                vec![BackendMessage::CommandComplete {
+                    tag: format!("MOVE {moved}"),
+                }]
+            }
+            None => {
+                vec![BackendMessage::ErrorResponse {
+                    severity: "ERROR".into(),
+                    code: "34000".into(),
+                    message: format!("cursor \"{cursor_name}\" does not exist"),
+                }]
+            }
+        }
+    }
+
+    fn handle_show_all(&self, session: &PgSession) -> Vec<BackendMessage> {
+        static DEFAULTS: &[(&str, &str, &str)] = &[
+            ("application_name", "", ""),
+            ("client_encoding", "UTF8", ""),
+            ("DateStyle", "ISO, MDY", ""),
+            ("default_transaction_isolation", "read committed", ""),
+            ("default_transaction_read_only", "off", ""),
+            ("extra_float_digits", "1", ""),
+            ("integer_datetimes", "on", ""),
+            ("IntervalStyle", "postgres", ""),
+            ("is_superuser", "on", ""),
+            ("max_identifier_length", "63", ""),
+            ("search_path", "\"$user\", public", ""),
+            ("server_encoding", "UTF8", ""),
+            ("server_version", crate::session::PG_COMPAT_VERSION, ""),
+            ("standard_conforming_strings", "on", ""),
+            ("TimeZone", "UTC", ""),
+            ("transaction_isolation", "read committed", ""),
+        ];
+
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Session overrides first
+        for (k, v) in &session.guc_vars {
+            seen.insert(k.as_str().to_owned());
+            rows.push(vec![Some(k.clone()), Some(v.clone()), Some(String::new())]);
+        }
+        // Defaults for anything not overridden
+        for &(name, val, desc) in DEFAULTS {
+            if !seen.contains(name) {
+                rows.push(vec![Some(name.into()), Some(val.into()), Some(desc.into())]);
+            }
+        }
+        rows.sort_by(|a, b| a[0].cmp(&b[0]));
+
+        self.single_row_result(
+            vec![
+                ("name", 25, -1i16),
+                ("setting", 25, -1),
+                ("description", 25, -1),
+            ],
+            rows,
+        )
+    }
+}
+
+/// Extract the first string argument from a SQL function call like `prefix('value')`.
+/// Strips surrounding quotes if present. Returns empty string on parse failure.
+fn extract_string_arg(sql_lower: &str, prefix: &str) -> String {
+    let after = sql_lower.trim_start_matches(prefix);
+    let inner = after.trim_end_matches(')').trim_end_matches(';').trim();
+    inner.trim_matches('\'').trim_matches('"').to_owned()
+}
+
+/// Extract a numeric argument from a SQL function call like `pg_sleep(1.5)`.
+fn extract_numeric_arg(sql: &str, func_prefix: &str) -> Option<f64> {
+    let start = sql.find(func_prefix)? + func_prefix.len();
+    let rest = &sql[start..];
+    let end = rest.find(')')?;
+    rest[..end].trim().parse::<f64>().ok()
+}
+
+/// Extract a string argument from a function call found anywhere in the SQL.
+/// Searches for `prefix` and extracts the quoted argument inside parens.
+fn extract_string_arg_from(sql: &str, func_prefix: &str) -> Option<String> {
+    let start = sql.find(func_prefix)? + func_prefix.len();
+    let rest = &sql[start..];
+    let end = rest.find(')')?;
+    let inner = rest[..end].trim().trim_matches('\'').trim_matches('"');
+    if inner.is_empty() {
+        None
+    } else {
+        Some(inner.to_owned())
+    }
+}
+
+/// Format bytes into a human-readable string like PG's pg_size_pretty.
+fn format_size_pretty(bytes: i64) -> String {
+    let abs = bytes.unsigned_abs();
+    let sign = if bytes < 0 { "-" } else { "" };
+    if abs < 1024 {
+        format!("{sign}{abs} bytes")
+    } else if abs < 1024 * 1024 {
+        format!("{sign}{} kB", abs / 1024)
+    } else if abs < 1024 * 1024 * 1024 {
+        format!("{sign}{} MB", abs / (1024 * 1024))
+    } else if abs < 1024 * 1024 * 1024 * 1024 {
+        format!("{sign}{} GB", abs / (1024 * 1024 * 1024))
+    } else {
+        format!("{sign}{} TB", abs / (1024 * 1024 * 1024 * 1024))
+    }
+}
+
+/// Parse an encryption scope string like "wal", "table_5", "sst_3", "backup".
+fn parse_encryption_scope(s: &str) -> Option<falcon_storage::encryption::EncryptionScope> {
+    use falcon_storage::encryption::EncryptionScope;
+    match s {
+        "wal" => Some(EncryptionScope::Wal),
+        "backup" => Some(EncryptionScope::Backup),
+        _ if s.starts_with("table_") => s
+            .strip_prefix("table_")?
+            .parse::<u64>()
+            .ok()
+            .map(EncryptionScope::Table),
+        _ if s.starts_with("sst_") => s
+            .strip_prefix("sst_")?
+            .parse::<u64>()
+            .ok()
+            .map(EncryptionScope::Sst),
+        _ => None,
+    }
+}

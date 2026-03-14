@@ -1,0 +1,18 @@
+[package]
+name = "falcon_enterprise"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+falcon_common = { path = "../falcon_common" }
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+rand.workspace = true
+subtle = "2.5"

@@ -1,0 +1,90 @@
+[package]
+name = "falcon_storage"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["lsm", "online_ddl_full", "disk_rowstore"]
+# Non-v1.0 storage engines (STUB / EXPERIMENTAL).
+columnstore = []
+disk_rowstore = []
+lsm = []
+rocksdb = ["dep:rocksdb"]
+redb = ["dep:redb"]
+# Linux 6.x io_uring backend for WAL I/O. Default OFF.
+# Enable with: cargo build --features io_uring
+io_uring = ["dep:io-uring"]
+# Enterprise features (STUB). Default OFF.
+encryption_tde = []
+pitr = []
+pitr_object_store = ["pitr", "dep:object_store"]
+online_ddl_full = []
+resource_isolation = []
+tenant = []
+cdc_stream = []
+
+# ── Edition profiles ────────────────────────────────────────────────────────
+# Community: in-memory rowstore only, no enterprise features.
+edition_community = []
+# Standard: RocksDB-backed disk-first OLTP, full PG compatibility.
+edition_standard = ["rocksdb", "online_ddl_full"]
+# Enterprise: Standard + columnstore + PITR + TDE + CDC + multi-tenant.
+edition_enterprise = ["rocksdb", "online_ddl_full", "columnstore",
+                      "pitr_object_store", "encryption_tde", "cdc_stream",
+                      "tenant", "resource_isolation"]
+# Analytics: columnstore primary, on-disk oriented for OLAP workloads.
+edition_analytics  = ["columnstore", "rocksdb", "online_ddl_full"]
+
+[dependencies]
+falcon_common = { path = "../falcon_common" }
+tokio.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+crossbeam.workspace = true
+crossbeam-skiplist.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+tracing.workspace = true
+crc32fast.workspace = true
+xxhash-rust.workspace = true
+lz4_flex.workspace = true
+zstd.workspace = true
+falcon_segment_codec.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+smallvec.workspace = true
+rocksdb = { workspace = true, optional = true }
+redb = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.7", optional = true }
+nix = { version = "0.29", features = ["fs", "mount", "sched"] }
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"
+criterion.workspace = true
+
+[[bench]]
+name = "bench_memtable"
+harness = false
+
+[[bench]]
+name = "bench_mvcc"
+harness = false

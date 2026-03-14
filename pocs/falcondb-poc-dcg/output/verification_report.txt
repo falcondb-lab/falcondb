@@ -1,0 +1,26 @@
+============================================================
+  FalconDB DCG PoC — Verification Report
+============================================================
+
+  Timestamp:       2026-03-04T07:46:45Z
+  Kill time:       2026-03-04T07:45:36Z
+  Promote time:    2026-03-04T07:45:41Z
+
+  Committed orders (acknowledged): 1000
+  Orders on replica (failover):    1001 (incl canary)
+  Orders on primary WAL recovery:  1001 (incl canary)
+
+  --- Replica Integrity ---
+  Missing (data loss):  0
+  Phantom (unexpected): 0
+  Duplicates:           0
+
+  --- WAL Durability ---
+  Missing (data loss):  0
+  Phantom (unexpected): 0
+  Duplicates:           0
+
+  Result: PASS
+  No committed data was lost.
+
+============================================================

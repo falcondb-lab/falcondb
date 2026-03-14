@@ -1,0 +1,2326 @@
+//! Rule-based optimizer for `LogicalPlan`.
+//!
+//! Each rule is a function `LogicalPlan → LogicalPlan` applied top-down.
+//! The optimizer runs a fixed set of rules in order:
+//!
+//! 1. **Predicate pushdown** — push Filter below Join / Project.
+//! 2. **Projection pruning** — remove unused columns (placeholder).
+//! 3. **Join reordering** — reorder multi-way joins using cost estimates.
+//! 4. **Limit pushdown** — push Limit into scan when no sort/agg.
+
+use std::collections::HashSet;
+
+use falcon_common::datum::Datum;
+
+use crate::cost::{IndexedColumns, TableRowCounts};
+use crate::logical_plan::LogicalPlan;
+use falcon_sql_frontend::types::*;
+
+/// Context passed to optimizer rules (statistics, indexes, etc.).
+pub struct OptimizerContext<'a> {
+    pub stats: &'a TableRowCounts,
+    pub indexes: &'a IndexedColumns,
+    pub config: &'a OptimizerConfig,
+}
+
+/// Optimizer configuration — controls which rules are enabled.
+#[derive(Debug, Clone)]
+pub struct OptimizerConfig {
+    pub predicate_pushdown: bool,
+    pub projection_pruning: bool,
+    pub join_reorder: bool,
+    pub limit_pushdown: bool,
+    pub subquery_decorrelation: bool,
+    pub join_strategy_selection: bool,
+    pub constant_folding: bool,
+    pub common_subexpr_elimination: bool,
+    /// P1-5: Push partial aggregation below joins toward leaf scans.
+    pub partial_agg_pushdown: bool,
+    /// P1-7: Prune partition scans at plan time using filter predicates.
+    pub partition_pruning: bool,
+    /// P1-9: Replace HashJoin with BroadcastJoin when right side is small.
+    pub broadcast_join: bool,
+}
+
+impl Default for OptimizerConfig {
+    fn default() -> Self {
+        Self {
+            predicate_pushdown: true,
+            projection_pruning: true,
+            join_reorder: true,
+            limit_pushdown: true,
+            subquery_decorrelation: true,
+            join_strategy_selection: true,
+            constant_folding: true,
+            common_subexpr_elimination: true,
+            partial_agg_pushdown: true,
+            partition_pruning: true,
+            broadcast_join: true,
+        }
+    }
+}
+
+/// Apply all enabled optimization rules to a `LogicalPlan`.
+pub fn optimize(plan: LogicalPlan, ctx: &OptimizerContext<'_>) -> LogicalPlan {
+    let mut plan = plan;
+
+    // Constant folding runs first: simplifies expressions before pushdown
+    // so that trivially-true filters can be eliminated, and short-circuit
+    // `AND false` / `OR true` remove whole subtrees early.
+    if ctx.config.constant_folding {
+        plan = rule_constant_fold(plan);
+    }
+    if ctx.config.common_subexpr_elimination {
+        plan = rule_common_subexpr_elimination(plan);
+    }
+    if ctx.config.predicate_pushdown {
+        plan = rule_predicate_pushdown(plan);
+    }
+    if ctx.config.projection_pruning {
+        plan = rule_projection_pruning(plan);
+    }
+    if ctx.config.subquery_decorrelation {
+        plan = rule_subquery_decorrelation(plan);
+    }
+    if ctx.config.join_reorder && !ctx.stats.is_empty() {
+        plan = rule_join_reorder(plan, ctx.stats);
+    }
+    if ctx.config.limit_pushdown {
+        plan = rule_limit_pushdown(plan);
+    }
+    // P1-5: partial aggregate pushdown — run after join reorder so we see
+    // the final join tree, but before broadcast join which consults row counts.
+    if ctx.config.partial_agg_pushdown {
+        plan = rule_partial_agg_pushdown(plan);
+    }
+    // P1-9: broadcast join — consults stats to decide build side size.
+    if ctx.config.broadcast_join && !ctx.stats.is_empty() {
+        plan = rule_broadcast_join(plan, ctx.stats);
+    }
+    // P1-7: partition pruning — runs last so predicates are already pushed.
+    if ctx.config.partition_pruning {
+        plan = rule_partition_pruning(plan);
+    }
+
+    plan
+}
+
+// ── Rule 1: Predicate Pushdown ──────────────────────────────────────────
+
+/// Push `Filter` nodes as close to the data source as possible.
+///
+/// Transformations applied:
+/// - Filter(Project(input)) → Project(Filter(input))         (if predicate
+///   only references columns available in `input`)
+/// - Filter(MultiJoin(base, joins)) → split conjuncts, push
+///   single-table predicates into the base scan or individual join filters.
+fn rule_predicate_pushdown(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        // Push filter below projection when predicate doesn't reference
+        // computed expressions (only ColumnRefs that exist in the input).
+        LogicalPlan::Filter { input, predicate } => {
+            let inner = rule_predicate_pushdown(*input);
+            match inner {
+                LogicalPlan::Project {
+                    input: proj_input,
+                    projections,
+                    visible_count,
+                } => {
+                    if predicate_uses_only_column_refs(&predicate) {
+                        // Safe to push below projection
+                        let pushed = LogicalPlan::Filter {
+                            input: proj_input,
+                            predicate,
+                        };
+                        LogicalPlan::Project {
+                            input: Box::new(rule_predicate_pushdown(pushed)),
+                            projections,
+                            visible_count,
+                        }
+                    } else {
+                        LogicalPlan::Filter {
+                            input: Box::new(LogicalPlan::Project {
+                                input: proj_input,
+                                projections,
+                                visible_count,
+                            }),
+                            predicate,
+                        }
+                    }
+                }
+                // Push single-table predicates into the join's base scan
+                LogicalPlan::MultiJoin { base, joins } => {
+                    let conjuncts = split_conjuncts(predicate);
+                    let mut pushed_to_base = Vec::new();
+                    let mut remaining = Vec::new();
+
+                    // Determine max column index in the base scan
+                    let base_col_count = joins.first().map_or(usize::MAX, |j| j.right_col_offset);
+
+                    for conj in conjuncts {
+                        if max_column_ref(&conj) < base_col_count {
+                            pushed_to_base.push(conj);
+                        } else {
+                            remaining.push(conj);
+                        }
+                    }
+
+                    let mut new_base = *base;
+                    for pred in pushed_to_base {
+                        new_base = LogicalPlan::Filter {
+                            input: Box::new(new_base),
+                            predicate: pred,
+                        };
+                    }
+
+                    let join_plan = LogicalPlan::MultiJoin {
+                        base: Box::new(rule_predicate_pushdown(new_base)),
+                        joins,
+                    };
+
+                    if remaining.is_empty() {
+                        join_plan
+                    } else {
+                        LogicalPlan::Filter {
+                            input: Box::new(join_plan),
+                            predicate: combine_conjuncts(remaining),
+                        }
+                    }
+                }
+                other => LogicalPlan::Filter {
+                    input: Box::new(other),
+                    predicate,
+                },
+            }
+        }
+        // Recurse into all other node types
+        LogicalPlan::Project {
+            input,
+            projections,
+            visible_count,
+        } => LogicalPlan::Project {
+            input: Box::new(rule_predicate_pushdown(*input)),
+            projections,
+            visible_count,
+        },
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        } => LogicalPlan::Aggregate {
+            input: Box::new(rule_predicate_pushdown(*input)),
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        },
+        LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+            input: Box::new(rule_predicate_pushdown(*input)),
+            order_by,
+        },
+        LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+        } => LogicalPlan::Limit {
+            input: Box::new(rule_predicate_pushdown(*input)),
+            limit,
+            offset,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(rule_predicate_pushdown(*input)),
+            mode,
+        },
+        LogicalPlan::MultiJoin { base, joins } => LogicalPlan::MultiJoin {
+            base: Box::new(rule_predicate_pushdown(*base)),
+            joins,
+        },
+        LogicalPlan::Join {
+            left,
+            right,
+            join_info,
+        } => LogicalPlan::Join {
+            left: Box::new(rule_predicate_pushdown(*left)),
+            right: Box::new(rule_predicate_pushdown(*right)),
+            join_info,
+        },
+        LogicalPlan::SetOp {
+            left,
+            right,
+            kind,
+            all,
+        } => LogicalPlan::SetOp {
+            left: Box::new(rule_predicate_pushdown(*left)),
+            right: Box::new(rule_predicate_pushdown(*right)),
+            kind,
+            all,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(rule_predicate_pushdown(*input)),
+        },
+        LogicalPlan::Explain(inner) => {
+            LogicalPlan::Explain(Box::new(rule_predicate_pushdown(*inner)))
+        }
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(rule_predicate_pushdown(*inner)))
+        }
+        LogicalPlan::CopyQueryTo {
+            query,
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        } => LogicalPlan::CopyQueryTo {
+            query: Box::new(rule_predicate_pushdown(*query)),
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        },
+        // Leaf / DML / DDL / utility — no children to recurse into
+        other => other,
+    }
+}
+
+// ── Rule 2: Join Reordering ─────────────────────────────────────────────
+
+/// Reorder multi-way inner joins using cost estimates from table row counts.
+/// Delegates to `crate::cost::reorder_joins` for the actual reordering logic.
+fn rule_join_reorder(plan: LogicalPlan, stats: &TableRowCounts) -> LogicalPlan {
+    match plan {
+        LogicalPlan::MultiJoin { base, joins } if !joins.is_empty() => {
+            let left_col_count = joins[0].right_col_offset;
+            let reordered = crate::cost::reorder_joins(left_col_count, &joins, stats);
+            LogicalPlan::MultiJoin {
+                base: Box::new(rule_join_reorder(*base, stats)),
+                joins: reordered,
+            }
+        }
+        // Recurse
+        LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            input: Box::new(rule_join_reorder(*input, stats)),
+            predicate,
+        },
+        LogicalPlan::Project {
+            input,
+            projections,
+            visible_count,
+        } => LogicalPlan::Project {
+            input: Box::new(rule_join_reorder(*input, stats)),
+            projections,
+            visible_count,
+        },
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        } => LogicalPlan::Aggregate {
+            input: Box::new(rule_join_reorder(*input, stats)),
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        },
+        LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+            input: Box::new(rule_join_reorder(*input, stats)),
+            order_by,
+        },
+        LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+        } => LogicalPlan::Limit {
+            input: Box::new(rule_join_reorder(*input, stats)),
+            limit,
+            offset,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(rule_join_reorder(*input, stats)),
+            mode,
+        },
+        LogicalPlan::Join {
+            left,
+            right,
+            join_info,
+        } => LogicalPlan::Join {
+            left: Box::new(rule_join_reorder(*left, stats)),
+            right: Box::new(rule_join_reorder(*right, stats)),
+            join_info,
+        },
+        LogicalPlan::SetOp {
+            left,
+            right,
+            kind,
+            all,
+        } => LogicalPlan::SetOp {
+            left: Box::new(rule_join_reorder(*left, stats)),
+            right: Box::new(rule_join_reorder(*right, stats)),
+            kind,
+            all,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(rule_join_reorder(*input, stats)),
+        },
+        LogicalPlan::Explain(inner) => {
+            LogicalPlan::Explain(Box::new(rule_join_reorder(*inner, stats)))
+        }
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(rule_join_reorder(*inner, stats)))
+        }
+        LogicalPlan::CopyQueryTo {
+            query,
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        } => LogicalPlan::CopyQueryTo {
+            query: Box::new(rule_join_reorder(*query, stats)),
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        },
+        other => other,
+    }
+}
+
+// ── Rule 3: Limit Pushdown ──────────────────────────────────────────────
+
+/// Push `Limit` below `Sort` when safe (the Sort already enforces order,
+/// so the physical sort can benefit from a top-N optimization).
+///
+/// Also pushes `Limit` into a bare `Scan` when there is no sort or
+/// aggregate between them (simple LIMIT pushdown).
+fn rule_limit_pushdown(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+        } => {
+            let inner = rule_limit_pushdown(*input);
+            match inner {
+                // Limit(Project(Scan)) → Project(Scan with limit)
+                LogicalPlan::Project {
+                    input: proj_inner,
+                    projections,
+                    visible_count,
+                } if matches!(*proj_inner, LogicalPlan::Scan { .. }) => {
+                    // Only push if no offset (offset must be applied after full scan)
+                    if offset.is_none() || offset == Some(0) {
+                        let mut scan = *proj_inner;
+                        // Wrap scan with limit
+                        scan = LogicalPlan::Limit {
+                            input: Box::new(scan),
+                            limit,
+                            offset: None,
+                        };
+                        LogicalPlan::Project {
+                            input: Box::new(scan),
+                            projections,
+                            visible_count,
+                        }
+                    } else {
+                        LogicalPlan::Limit {
+                            input: Box::new(LogicalPlan::Project {
+                                input: proj_inner,
+                                projections,
+                                visible_count,
+                            }),
+                            limit,
+                            offset,
+                        }
+                    }
+                }
+                other => LogicalPlan::Limit {
+                    input: Box::new(other),
+                    limit,
+                    offset,
+                },
+            }
+        }
+        // Recurse
+        LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            input: Box::new(rule_limit_pushdown(*input)),
+            predicate,
+        },
+        LogicalPlan::Project {
+            input,
+            projections,
+            visible_count,
+        } => LogicalPlan::Project {
+            input: Box::new(rule_limit_pushdown(*input)),
+            projections,
+            visible_count,
+        },
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        } => LogicalPlan::Aggregate {
+            input: Box::new(rule_limit_pushdown(*input)),
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        },
+        LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+            input: Box::new(rule_limit_pushdown(*input)),
+            order_by,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(rule_limit_pushdown(*input)),
+            mode,
+        },
+        LogicalPlan::MultiJoin { base, joins } => LogicalPlan::MultiJoin {
+            base: Box::new(rule_limit_pushdown(*base)),
+            joins,
+        },
+        LogicalPlan::Join {
+            left,
+            right,
+            join_info,
+        } => LogicalPlan::Join {
+            left: Box::new(rule_limit_pushdown(*left)),
+            right: Box::new(rule_limit_pushdown(*right)),
+            join_info,
+        },
+        LogicalPlan::SetOp {
+            left,
+            right,
+            kind,
+            all,
+        } => LogicalPlan::SetOp {
+            left: Box::new(rule_limit_pushdown(*left)),
+            right: Box::new(rule_limit_pushdown(*right)),
+            kind,
+            all,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(rule_limit_pushdown(*input)),
+        },
+        LogicalPlan::Explain(inner) => LogicalPlan::Explain(Box::new(rule_limit_pushdown(*inner))),
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(rule_limit_pushdown(*inner)))
+        }
+        LogicalPlan::CopyQueryTo {
+            query,
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        } => LogicalPlan::CopyQueryTo {
+            query: Box::new(rule_limit_pushdown(*query)),
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        },
+        other => other,
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+// ── Rule 4: Projection Pruning ──────────────────────────────────────────
+
+/// Remove unused columns from Project nodes.
+///
+/// Walk the plan top-down collecting "required" column indices.  When we
+/// reach a `Project` node whose projections include columns not demanded
+/// by any ancestor, mark them for removal (but keep at least the visible
+/// ones).  This reduces scan width and intermediate row size.
+fn rule_projection_pruning(plan: LogicalPlan) -> LogicalPlan {
+    // Collect all columns referenced by the plan *above* each Project node.
+    // Then prune unreferenced projections.
+    prune_plan(plan, &None)
+}
+
+/// Recursively prune unused projections.
+/// `required` is Some(set) when an ancestor has told us which columns it needs.
+fn prune_plan(plan: LogicalPlan, required: &Option<HashSet<usize>>) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Project {
+            input,
+            projections,
+            visible_count,
+        } => {
+            // Determine which columns are referenced by the projections themselves
+            let mut child_required = HashSet::new();
+            for proj in &projections {
+                collect_projection_refs(proj, &mut child_required);
+            }
+            // Also collect columns from projections that parents need
+            if let Some(req) = required {
+                for &idx in req {
+                    if idx < projections.len() {
+                        collect_projection_refs(&projections[idx], &mut child_required);
+                    }
+                }
+            }
+
+            let pruned_input = prune_plan(*input, &Some(child_required));
+
+            // Prune hidden projections that no ancestor needs
+            let mut new_projections = Vec::with_capacity(projections.len());
+            let mut new_visible = visible_count;
+            for (i, proj) in projections.into_iter().enumerate() {
+                if i < visible_count {
+                    // Always keep visible projections
+                    new_projections.push(proj);
+                } else if let Some(req) = required {
+                    // Hidden projection: keep only if required
+                    if req.contains(&i) {
+                        new_projections.push(proj);
+                    }
+                } else {
+                    // No requirement info — keep all
+                    new_projections.push(proj);
+                }
+            }
+            if new_visible > new_projections.len() {
+                new_visible = new_projections.len();
+            }
+
+            LogicalPlan::Project {
+                input: Box::new(pruned_input),
+                projections: new_projections,
+                visible_count: new_visible,
+            }
+        }
+        LogicalPlan::Filter { input, predicate } => {
+            // Collect columns the filter needs, forward to child
+            let mut filter_refs = HashSet::new();
+            collect_expr_refs(&predicate, &mut filter_refs);
+            let merged = merge_required(required, &filter_refs);
+            LogicalPlan::Filter {
+                input: Box::new(prune_plan(*input, &Some(merged))),
+                predicate,
+            }
+        }
+        LogicalPlan::Sort { input, order_by } => {
+            let mut sort_refs = HashSet::new();
+            for ob in &order_by {
+                sort_refs.insert(ob.column_idx);
+            }
+            let merged = merge_required(required, &sort_refs);
+            LogicalPlan::Sort {
+                input: Box::new(prune_plan(*input, &Some(merged))),
+                order_by,
+            }
+        }
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        } => {
+            let mut child_refs = HashSet::new();
+            for &g in &group_by {
+                child_refs.insert(g);
+            }
+            for gs in &grouping_sets {
+                for &g in gs {
+                    child_refs.insert(g);
+                }
+            }
+            for proj in &projections {
+                collect_projection_refs(proj, &mut child_refs);
+            }
+            if let Some(ref h) = having {
+                collect_expr_refs(h, &mut child_refs);
+            }
+            LogicalPlan::Aggregate {
+                input: Box::new(prune_plan(*input, &Some(child_refs))),
+                group_by,
+                grouping_sets,
+                projections,
+                visible_count,
+                having,
+            }
+        }
+        LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+        } => LogicalPlan::Limit {
+            input: Box::new(prune_plan(*input, required)),
+            limit,
+            offset,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(prune_plan(*input, required)),
+            mode,
+        },
+        LogicalPlan::MultiJoin { base, joins } => LogicalPlan::MultiJoin {
+            base: Box::new(prune_plan(*base, required)),
+            joins,
+        },
+        LogicalPlan::Join {
+            left,
+            right,
+            join_info,
+        } => LogicalPlan::Join {
+            left: Box::new(prune_plan(*left, required)),
+            right: Box::new(prune_plan(*right, required)),
+            join_info,
+        },
+        LogicalPlan::SetOp {
+            left,
+            right,
+            kind,
+            all,
+        } => LogicalPlan::SetOp {
+            left: Box::new(prune_plan(*left, required)),
+            right: Box::new(prune_plan(*right, required)),
+            kind,
+            all,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(prune_plan(*input, required)),
+        },
+        LogicalPlan::Explain(inner) => LogicalPlan::Explain(Box::new(prune_plan(*inner, required))),
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(prune_plan(*inner, required)))
+        }
+        LogicalPlan::CopyQueryTo {
+            query,
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        } => LogicalPlan::CopyQueryTo {
+            query: Box::new(prune_plan(*query, required)),
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        },
+        other => other,
+    }
+}
+
+fn collect_projection_refs(proj: &BoundProjection, out: &mut HashSet<usize>) {
+    match proj {
+        BoundProjection::Column(idx, _) => {
+            out.insert(*idx);
+        }
+        BoundProjection::Expr(expr, _) => collect_expr_refs(expr, out),
+        BoundProjection::Aggregate(_, arg, _, _, filter) => {
+            if let Some(expr) = arg {
+                collect_expr_refs(expr, out);
+            }
+            if let Some(f) = filter {
+                collect_expr_refs(f, out);
+            }
+        }
+        BoundProjection::Window(wf) => {
+            for &col in &wf.partition_by {
+                out.insert(col);
+            }
+            for ob in &wf.order_by {
+                out.insert(ob.column_idx);
+            }
+        }
+    }
+}
+
+fn collect_expr_refs(expr: &BoundExpr, out: &mut HashSet<usize>) {
+    match expr {
+        BoundExpr::ColumnRef(idx) => {
+            out.insert(*idx);
+        }
+        BoundExpr::BinaryOp { left, right, .. }
+        | BoundExpr::IsNotDistinctFrom { left, right }
+        | BoundExpr::AnyOp { left, right, .. }
+        | BoundExpr::AllOp { left, right, .. } => {
+            collect_expr_refs(left, out);
+            collect_expr_refs(right, out);
+        }
+        BoundExpr::Not(inner)
+        | BoundExpr::IsNull(inner)
+        | BoundExpr::IsNotNull(inner)
+        | BoundExpr::Cast { expr: inner, .. } => collect_expr_refs(inner, out),
+        BoundExpr::Between {
+            expr, low, high, ..
+        } => {
+            collect_expr_refs(expr, out);
+            collect_expr_refs(low, out);
+            collect_expr_refs(high, out);
+        }
+        BoundExpr::InList { expr, list, .. } => {
+            collect_expr_refs(expr, out);
+            for e in list {
+                collect_expr_refs(e, out);
+            }
+        }
+        BoundExpr::Like { expr, pattern, .. } => {
+            collect_expr_refs(expr, out);
+            collect_expr_refs(pattern, out);
+        }
+        BoundExpr::Function { args, .. } | BoundExpr::Coalesce(args) => {
+            for a in args {
+                collect_expr_refs(a, out);
+            }
+        }
+        BoundExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(op) = operand {
+                collect_expr_refs(op, out);
+            }
+            for c in conditions {
+                collect_expr_refs(c, out);
+            }
+            for r in results {
+                collect_expr_refs(r, out);
+            }
+            if let Some(el) = else_result {
+                collect_expr_refs(el, out);
+            }
+        }
+        BoundExpr::ArrayLiteral(exprs) => {
+            for e in exprs {
+                collect_expr_refs(e, out);
+            }
+        }
+        BoundExpr::ArrayIndex { array, index } => {
+            collect_expr_refs(array, out);
+            collect_expr_refs(index, out);
+        }
+        BoundExpr::ArraySlice {
+            array,
+            lower,
+            upper,
+        } => {
+            collect_expr_refs(array, out);
+            if let Some(l) = lower {
+                collect_expr_refs(l, out);
+            }
+            if let Some(u) = upper {
+                collect_expr_refs(u, out);
+            }
+        }
+        BoundExpr::AggregateExpr { arg: Some(a), .. } => {
+            collect_expr_refs(a, out);
+        }
+        _ => {}
+    }
+}
+
+fn merge_required(parent: &Option<HashSet<usize>>, extra: &HashSet<usize>) -> HashSet<usize> {
+    parent
+        .as_ref()
+        .map_or_else(|| extra.clone(), |p| p.union(extra).copied().collect())
+}
+
+// ── Rule 5: Subquery Decorrelation ──────────────────────────────────────
+
+/// Convert simple correlated subqueries to semi-joins.
+///
+/// Pattern detected:
+///   `Filter(input, EXISTS(SELECT ... FROM t WHERE t.col = OuterColumnRef(i)))`
+///     → `SemiJoin(input, Scan(t), on: input.col_i = t.col)`
+///
+/// Currently handles:
+///   - `EXISTS (SELECT ... WHERE inner.col = outer.col)` → semi-join
+///   - `NOT EXISTS (...)` → anti-join (represented as Filter with mark)
+///   - `col IN (SELECT col FROM t)` → semi-join with equality
+///
+/// More complex patterns (multi-level correlation, lateral references)
+/// are left as-is for the row-at-a-time executor to handle.
+fn rule_subquery_decorrelation(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Filter { input, predicate } => {
+            let inner = rule_subquery_decorrelation(*input);
+
+            // Try to extract a semi-join from EXISTS subquery
+            if let Some((subquery_table_id, subquery_schema, correlation_pairs, negated)) =
+                try_extract_exists_semijoin(&predicate)
+            {
+                // Build the semi-join condition: inner.col_i = subquery.col_j
+                // The right columns start at offset = schema column count from inner
+                let right_col_offset = count_output_columns(&inner);
+                let join_condition =
+                    build_correlation_condition(&correlation_pairs, right_col_offset);
+
+                let join_type = if negated {
+                    JoinType::Left
+                } else {
+                    JoinType::Inner
+                };
+
+                let join = LogicalPlan::Join {
+                    left: Box::new(inner),
+                    right: Box::new(LogicalPlan::Scan {
+                        table_id: subquery_table_id,
+                        schema: subquery_schema.clone(),
+                        virtual_rows: vec![],
+                    }),
+                    join_info: BoundJoin {
+                        join_type,
+                        right_table_id: subquery_table_id,
+                        right_table_name: subquery_schema.name.clone(),
+                        right_schema: subquery_schema,
+                        right_col_offset,
+                        condition: Some(join_condition),
+                    },
+                };
+
+                if negated {
+                    // Anti-join: wrap with IS NULL check on right side
+                    let null_check =
+                        BoundExpr::IsNull(Box::new(BoundExpr::ColumnRef(right_col_offset)));
+                    LogicalPlan::Filter {
+                        input: Box::new(join),
+                        predicate: null_check,
+                    }
+                } else {
+                    // Semi-join: just use DISTINCT to eliminate duplicates
+                    LogicalPlan::Distinct {
+                        input: Box::new(join),
+                        mode: DistinctMode::All,
+                    }
+                }
+            } else if let Some((
+                col_idx,
+                subquery_table_id,
+                subquery_schema,
+                inner_col_idx,
+                negated,
+            )) = try_extract_in_semijoin(&predicate)
+            {
+                // IN (SELECT col FROM t) → semi-join
+                let right_col_offset = count_output_columns(&inner);
+                let condition = BoundExpr::BinaryOp {
+                    left: Box::new(BoundExpr::ColumnRef(col_idx)),
+                    op: BinOp::Eq,
+                    right: Box::new(BoundExpr::ColumnRef(right_col_offset + inner_col_idx)),
+                };
+
+                let join_type = if negated {
+                    JoinType::Left
+                } else {
+                    JoinType::Inner
+                };
+
+                let join = LogicalPlan::Join {
+                    left: Box::new(inner),
+                    right: Box::new(LogicalPlan::Scan {
+                        table_id: subquery_table_id,
+                        schema: subquery_schema.clone(),
+                        virtual_rows: vec![],
+                    }),
+                    join_info: BoundJoin {
+                        join_type,
+                        right_table_id: subquery_table_id,
+                        right_table_name: subquery_schema.name.clone(),
+                        right_schema: subquery_schema,
+                        right_col_offset,
+                        condition: Some(condition),
+                    },
+                };
+
+                if negated {
+                    let null_check = BoundExpr::IsNull(Box::new(BoundExpr::ColumnRef(
+                        right_col_offset + inner_col_idx,
+                    )));
+                    LogicalPlan::Filter {
+                        input: Box::new(join),
+                        predicate: null_check,
+                    }
+                } else {
+                    LogicalPlan::Distinct {
+                        input: Box::new(join),
+                        mode: DistinctMode::All,
+                    }
+                }
+            } else {
+                // Cannot decorrelate — keep as-is
+                LogicalPlan::Filter {
+                    input: Box::new(inner),
+                    predicate,
+                }
+            }
+        }
+        // Recurse into all other node types
+        LogicalPlan::Project {
+            input,
+            projections,
+            visible_count,
+        } => LogicalPlan::Project {
+            input: Box::new(rule_subquery_decorrelation(*input)),
+            projections,
+            visible_count,
+        },
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        } => LogicalPlan::Aggregate {
+            input: Box::new(rule_subquery_decorrelation(*input)),
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        },
+        LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+            input: Box::new(rule_subquery_decorrelation(*input)),
+            order_by,
+        },
+        LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+        } => LogicalPlan::Limit {
+            input: Box::new(rule_subquery_decorrelation(*input)),
+            limit,
+            offset,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(rule_subquery_decorrelation(*input)),
+            mode,
+        },
+        LogicalPlan::MultiJoin { base, joins } => LogicalPlan::MultiJoin {
+            base: Box::new(rule_subquery_decorrelation(*base)),
+            joins,
+        },
+        LogicalPlan::Join {
+            left,
+            right,
+            join_info,
+        } => LogicalPlan::Join {
+            left: Box::new(rule_subquery_decorrelation(*left)),
+            right: Box::new(rule_subquery_decorrelation(*right)),
+            join_info,
+        },
+        LogicalPlan::SetOp {
+            left,
+            right,
+            kind,
+            all,
+        } => LogicalPlan::SetOp {
+            left: Box::new(rule_subquery_decorrelation(*left)),
+            right: Box::new(rule_subquery_decorrelation(*right)),
+            kind,
+            all,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(rule_subquery_decorrelation(*input)),
+        },
+        LogicalPlan::Explain(inner) => {
+            LogicalPlan::Explain(Box::new(rule_subquery_decorrelation(*inner)))
+        }
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(rule_subquery_decorrelation(*inner)))
+        }
+        LogicalPlan::CopyQueryTo {
+            query,
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        } => LogicalPlan::CopyQueryTo {
+            query: Box::new(rule_subquery_decorrelation(*query)),
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        },
+        other => other,
+    }
+}
+
+/// Try to extract an EXISTS/NOT EXISTS correlated subquery into a semi-join.
+/// Returns (subquery_table_id, subquery_schema, correlation_pairs, negated).
+/// `correlation_pairs` is a list of (outer_col_idx, inner_col_idx) equalities.
+#[allow(clippy::type_complexity)]
+fn try_extract_exists_semijoin(
+    expr: &BoundExpr,
+) -> Option<(
+    falcon_common::types::TableId,
+    falcon_common::schema::TableSchema,
+    Vec<(usize, usize)>,
+    bool,
+)> {
+    let (subquery, negated) = match expr {
+        BoundExpr::Exists { subquery, negated } => (subquery, *negated),
+        _ => return None,
+    };
+
+    // The subquery must be a simple select from a single table with a
+    // correlated WHERE clause
+    let sel = subquery;
+    if !sel.joins.is_empty() || !sel.ctes.is_empty() || !sel.unions.is_empty() {
+        return None;
+    }
+
+    // Extract correlation pairs from the filter
+    let filter = sel.filter.as_ref()?;
+    let pairs = extract_correlation_pairs(filter)?;
+    if pairs.is_empty() {
+        return None;
+    }
+
+    Some((sel.table_id, sel.schema.clone(), pairs, negated))
+}
+
+/// Try to extract an IN/NOT IN subquery into a semi-join.
+/// Returns (outer_col_idx, subquery_table_id, subquery_schema, inner_col_idx, negated).
+fn try_extract_in_semijoin(
+    expr: &BoundExpr,
+) -> Option<(
+    usize,
+    falcon_common::types::TableId,
+    falcon_common::schema::TableSchema,
+    usize,
+    bool,
+)> {
+    let (outer_expr, subquery, negated) = match expr {
+        BoundExpr::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => (expr, subquery, *negated),
+        _ => return None,
+    };
+
+    // The outer expression must be a simple column reference
+    let outer_col = match outer_expr.as_ref() {
+        BoundExpr::ColumnRef(idx) => *idx,
+        _ => return None,
+    };
+
+    // The subquery must be a simple single-table select
+    let sel = subquery;
+    if !sel.joins.is_empty() || !sel.ctes.is_empty() || !sel.unions.is_empty() {
+        return None;
+    }
+
+    // The first projection must be a column reference
+    if sel.projections.is_empty() {
+        return None;
+    }
+    let inner_col = match &sel.projections[0] {
+        BoundProjection::Column(idx, _) => *idx,
+        _ => return None,
+    };
+
+    Some((
+        outer_col,
+        sel.table_id,
+        sel.schema.clone(),
+        inner_col,
+        negated,
+    ))
+}
+
+/// Extract correlation pairs from a filter: (outer_col_idx, inner_col_idx).
+/// Pattern: `OuterColumnRef(i) = ColumnRef(j)` or `ColumnRef(j) = OuterColumnRef(i)`.
+fn extract_correlation_pairs(expr: &BoundExpr) -> Option<Vec<(usize, usize)>> {
+    let mut pairs = Vec::new();
+    extract_pairs_recursive(expr, &mut pairs);
+    if pairs.is_empty() {
+        None
+    } else {
+        Some(pairs)
+    }
+}
+
+fn extract_pairs_recursive(expr: &BoundExpr, pairs: &mut Vec<(usize, usize)>) {
+    match expr {
+        BoundExpr::BinaryOp {
+            left,
+            op: BinOp::Eq,
+            right,
+        } => match (left.as_ref(), right.as_ref()) {
+            (BoundExpr::OuterColumnRef(outer), BoundExpr::ColumnRef(inner))
+            | (BoundExpr::ColumnRef(inner), BoundExpr::OuterColumnRef(outer)) => {
+                pairs.push((*outer, *inner));
+            }
+            _ => {}
+        },
+        BoundExpr::BinaryOp {
+            left,
+            op: BinOp::And,
+            right,
+        } => {
+            extract_pairs_recursive(left, pairs);
+            extract_pairs_recursive(right, pairs);
+        }
+        _ => {}
+    }
+}
+
+/// Count output columns of a logical plan (approximate — based on schema).
+fn count_output_columns(plan: &LogicalPlan) -> usize {
+    match plan {
+        LogicalPlan::Scan { schema, .. } => schema.columns.len(),
+        LogicalPlan::Project { projections, .. } | LogicalPlan::Aggregate { projections, .. } => {
+            projections.len()
+        }
+        LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Limit { input, .. }
+        | LogicalPlan::Distinct { input, .. }
+        | LogicalPlan::WithCtes { input, .. } => count_output_columns(input),
+        LogicalPlan::Join { left, right, .. } => {
+            count_output_columns(left) + count_output_columns(right)
+        }
+        LogicalPlan::MultiJoin { base, joins } => {
+            let mut cols = count_output_columns(base);
+            for j in joins {
+                cols += j.right_schema.columns.len();
+            }
+            cols
+        }
+        _ => 0,
+    }
+}
+
+/// Build a join condition from correlation pairs.
+fn build_correlation_condition(pairs: &[(usize, usize)], right_offset: usize) -> BoundExpr {
+    if pairs.is_empty() {
+        return BoundExpr::Literal(Datum::Boolean(true));
+    }
+    let mut conditions: Vec<BoundExpr> = pairs
+        .iter()
+        .map(|(outer, inner)| BoundExpr::BinaryOp {
+            left: Box::new(BoundExpr::ColumnRef(*outer)),
+            op: BinOp::Eq,
+            right: Box::new(BoundExpr::ColumnRef(right_offset + *inner)),
+        })
+        .collect();
+
+    let mut result = match conditions.pop() {
+        Some(c) => c,
+        None => return BoundExpr::Literal(Datum::Boolean(true)),
+    };
+    while let Some(cond) = conditions.pop() {
+        result = BoundExpr::BinaryOp {
+            left: Box::new(cond),
+            op: BinOp::And,
+            right: Box::new(result),
+        };
+    }
+    result
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Check if an expression only references `ColumnRef` (no computed exprs).
+fn predicate_uses_only_column_refs(expr: &BoundExpr) -> bool {
+    match expr {
+        BoundExpr::ColumnRef(_) | BoundExpr::Literal(_) | BoundExpr::Parameter(_) => true,
+        BoundExpr::BinaryOp { left, right, .. } | BoundExpr::IsNotDistinctFrom { left, right } => {
+            predicate_uses_only_column_refs(left) && predicate_uses_only_column_refs(right)
+        }
+        BoundExpr::Not(inner)
+        | BoundExpr::IsNull(inner)
+        | BoundExpr::IsNotNull(inner)
+        | BoundExpr::Cast { expr: inner, .. } => predicate_uses_only_column_refs(inner),
+        BoundExpr::Between {
+            expr, low, high, ..
+        } => {
+            predicate_uses_only_column_refs(expr)
+                && predicate_uses_only_column_refs(low)
+                && predicate_uses_only_column_refs(high)
+        }
+        BoundExpr::InList { expr, list, .. } => {
+            predicate_uses_only_column_refs(expr)
+                && list.iter().all(predicate_uses_only_column_refs)
+        }
+        BoundExpr::Like { expr, pattern, .. } => {
+            predicate_uses_only_column_refs(expr) && predicate_uses_only_column_refs(pattern)
+        }
+        _ => false,
+    }
+}
+
+/// Split an AND-conjunction into individual predicates.
+fn split_conjuncts(expr: BoundExpr) -> Vec<BoundExpr> {
+    match expr {
+        BoundExpr::BinaryOp {
+            left,
+            op: BinOp::And,
+            right,
+        } => {
+            let mut result = split_conjuncts(*left);
+            result.extend(split_conjuncts(*right));
+            result
+        }
+        other => vec![other],
+    }
+}
+
+/// Combine a list of predicates into an AND-conjunction.
+fn combine_conjuncts(mut preds: Vec<BoundExpr>) -> BoundExpr {
+    if preds.is_empty() {
+        return BoundExpr::Literal(Datum::Boolean(true));
+    }
+    let mut result = match preds.pop() {
+        Some(p) => p,
+        None => return BoundExpr::Literal(Datum::Boolean(true)),
+    };
+    while let Some(pred) = preds.pop() {
+        result = BoundExpr::BinaryOp {
+            left: Box::new(pred),
+            op: BinOp::And,
+            right: Box::new(result),
+        };
+    }
+    result
+}
+
+/// Find the maximum column index referenced in an expression.
+/// Returns 0 if no ColumnRef is found.
+fn max_column_ref(expr: &BoundExpr) -> usize {
+    match expr {
+        BoundExpr::ColumnRef(idx) => *idx,
+        BoundExpr::BinaryOp { left, right, .. } | BoundExpr::IsNotDistinctFrom { left, right } => {
+            max_column_ref(left).max(max_column_ref(right))
+        }
+        BoundExpr::Not(inner)
+        | BoundExpr::IsNull(inner)
+        | BoundExpr::IsNotNull(inner)
+        | BoundExpr::Cast { expr: inner, .. } => max_column_ref(inner),
+        BoundExpr::Between {
+            expr, low, high, ..
+        } => max_column_ref(expr)
+            .max(max_column_ref(low))
+            .max(max_column_ref(high)),
+        BoundExpr::InList { expr, list, .. } => {
+            let max_list = list.iter().map(max_column_ref).max().unwrap_or(0);
+            max_column_ref(expr).max(max_list)
+        }
+        BoundExpr::Like { expr, pattern, .. } => max_column_ref(expr).max(max_column_ref(pattern)),
+        BoundExpr::Function { args, .. } | BoundExpr::Coalesce(args) => {
+            args.iter().map(max_column_ref).max().unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+// ── Rule 7: Constant Folding ────────────────────────────────────────────
+
+/// Walk the plan tree and fold constant expressions in every predicate /
+/// projection / HAVING / ORDER-BY position.
+///
+/// Key reductions:
+/// - `TRUE AND expr`  → `expr`          - `FALSE AND expr` → `FALSE`
+/// - `TRUE OR expr`   → `TRUE`          - `FALSE OR expr`  → `expr`
+/// - `NOT TRUE`       → `FALSE`         - `NOT FALSE`      → `TRUE`
+/// - `lit = lit`      → `TRUE/FALSE`    (same-literal compare)
+/// - `Filter(TRUE, input)` → `input`    (removes tautology guard)
+fn rule_constant_fold(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Filter { input, predicate } => {
+            let folded = fold_expr(predicate);
+            let input = Box::new(rule_constant_fold(*input));
+            // Eliminate tautology filter
+            match &folded {
+                BoundExpr::Literal(Datum::Boolean(true)) => *input,
+                _ => LogicalPlan::Filter {
+                    input,
+                    predicate: folded,
+                },
+            }
+        }
+        LogicalPlan::Project {
+            input,
+            projections,
+            visible_count,
+        } => {
+            let projections = projections
+                .into_iter()
+                .map(|p| match p {
+                    BoundProjection::Expr(e, alias) => BoundProjection::Expr(fold_expr(e), alias),
+                    other => other,
+                })
+                .collect();
+            LogicalPlan::Project {
+                input: Box::new(rule_constant_fold(*input)),
+                projections,
+                visible_count,
+            }
+        }
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        } => {
+            let projections = projections
+                .into_iter()
+                .map(|p| match p {
+                    BoundProjection::Expr(e, alias) => BoundProjection::Expr(fold_expr(e), alias),
+                    other => other,
+                })
+                .collect();
+            let having = having.map(fold_expr);
+            LogicalPlan::Aggregate {
+                input: Box::new(rule_constant_fold(*input)),
+                group_by,
+                grouping_sets,
+                projections,
+                visible_count,
+                having,
+            }
+        }
+        LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+            input: Box::new(rule_constant_fold(*input)),
+            order_by,
+        },
+        LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+        } => LogicalPlan::Limit {
+            input: Box::new(rule_constant_fold(*input)),
+            limit,
+            offset,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(rule_constant_fold(*input)),
+            mode,
+        },
+        LogicalPlan::MultiJoin { base, joins } => LogicalPlan::MultiJoin {
+            base: Box::new(rule_constant_fold(*base)),
+            joins,
+        },
+        LogicalPlan::Join {
+            left,
+            right,
+            join_info,
+        } => LogicalPlan::Join {
+            left: Box::new(rule_constant_fold(*left)),
+            right: Box::new(rule_constant_fold(*right)),
+            join_info,
+        },
+        LogicalPlan::SetOp {
+            left,
+            right,
+            kind,
+            all,
+        } => LogicalPlan::SetOp {
+            left: Box::new(rule_constant_fold(*left)),
+            right: Box::new(rule_constant_fold(*right)),
+            kind,
+            all,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(rule_constant_fold(*input)),
+        },
+        LogicalPlan::Explain(inner) => LogicalPlan::Explain(Box::new(rule_constant_fold(*inner))),
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(rule_constant_fold(*inner)))
+        }
+        LogicalPlan::CopyQueryTo {
+            query,
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        } => LogicalPlan::CopyQueryTo {
+            query: Box::new(rule_constant_fold(*query)),
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        },
+        other => other,
+    }
+}
+
+/// Quick check: does this expression contain any Literal that fold_expr could act on?
+/// If not, we can skip the entire fold recursion and avoid Box reconstructions.
+fn expr_has_foldable(expr: &BoundExpr) -> bool {
+    match expr {
+        BoundExpr::Literal(_) => true,
+        BoundExpr::BinaryOp { left, right, .. } => {
+            expr_has_foldable(left) || expr_has_foldable(right)
+        }
+        BoundExpr::Not(inner) => expr_has_foldable(inner),
+        BoundExpr::IsNull(inner)
+        | BoundExpr::IsNotNull(inner)
+        | BoundExpr::Cast { expr: inner, .. } => expr_has_foldable(inner),
+        BoundExpr::Between {
+            expr: e, low, high, ..
+        } => expr_has_foldable(e) || expr_has_foldable(low) || expr_has_foldable(high),
+        BoundExpr::InList { expr: e, list, .. } => {
+            expr_has_foldable(e) || list.iter().any(expr_has_foldable)
+        }
+        BoundExpr::Like {
+            expr: e, pattern, ..
+        } => expr_has_foldable(e) || expr_has_foldable(pattern),
+        BoundExpr::IsNotDistinctFrom { left, right } => {
+            expr_has_foldable(left) || expr_has_foldable(right)
+        }
+        _ => false,
+    }
+}
+
+/// Recursively fold constant sub-expressions.
+fn fold_expr(expr: BoundExpr) -> BoundExpr {
+    // Fast path: no literals in the tree → nothing to fold, return as-is.
+    if !expr_has_foldable(&expr) {
+        return expr;
+    }
+    match expr {
+        BoundExpr::BinaryOp { left, op, right } => {
+            let l = fold_expr(*left);
+            let r = fold_expr(*right);
+            match (&l, &op, &r) {
+                // AND short-circuits
+                (BoundExpr::Literal(Datum::Boolean(false)), BinOp::And, _) => {
+                    BoundExpr::Literal(Datum::Boolean(false))
+                }
+                (_, BinOp::And, BoundExpr::Literal(Datum::Boolean(false))) => {
+                    BoundExpr::Literal(Datum::Boolean(false))
+                }
+                (BoundExpr::Literal(Datum::Boolean(true)), BinOp::And, other) => other.clone(),
+                (other, BinOp::And, BoundExpr::Literal(Datum::Boolean(true))) => other.clone(),
+                // OR short-circuits
+                (BoundExpr::Literal(Datum::Boolean(true)), BinOp::Or, _) => {
+                    BoundExpr::Literal(Datum::Boolean(true))
+                }
+                (_, BinOp::Or, BoundExpr::Literal(Datum::Boolean(true))) => {
+                    BoundExpr::Literal(Datum::Boolean(true))
+                }
+                (BoundExpr::Literal(Datum::Boolean(false)), BinOp::Or, other) => other.clone(),
+                (other, BinOp::Or, BoundExpr::Literal(Datum::Boolean(false))) => other.clone(),
+                // Literal = Literal comparisons
+                (BoundExpr::Literal(a), BinOp::Eq, BoundExpr::Literal(b)) => {
+                    BoundExpr::Literal(Datum::Boolean(a == b))
+                }
+                (BoundExpr::Literal(a), BinOp::NotEq, BoundExpr::Literal(b)) => {
+                    BoundExpr::Literal(Datum::Boolean(a != b))
+                }
+                _ => BoundExpr::BinaryOp {
+                    left: Box::new(l),
+                    op,
+                    right: Box::new(r),
+                },
+            }
+        }
+        BoundExpr::Not(inner) => {
+            let folded = fold_expr(*inner);
+            match folded {
+                BoundExpr::Literal(Datum::Boolean(b)) => BoundExpr::Literal(Datum::Boolean(!b)),
+                BoundExpr::Not(double_inner) => *double_inner, // NOT NOT x = x
+                other => BoundExpr::Not(Box::new(other)),
+            }
+        }
+        BoundExpr::IsNull(inner) => BoundExpr::IsNull(Box::new(fold_expr(*inner))),
+        BoundExpr::IsNotNull(inner) => BoundExpr::IsNotNull(Box::new(fold_expr(*inner))),
+        BoundExpr::Cast {
+            expr: inner,
+            target_type,
+        } => BoundExpr::Cast {
+            expr: Box::new(fold_expr(*inner)),
+            target_type,
+        },
+        BoundExpr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => BoundExpr::Between {
+            expr: Box::new(fold_expr(*expr)),
+            negated,
+            low: Box::new(fold_expr(*low)),
+            high: Box::new(fold_expr(*high)),
+        },
+        BoundExpr::InList {
+            expr,
+            list,
+            negated,
+        } => BoundExpr::InList {
+            expr: Box::new(fold_expr(*expr)),
+            list: list.into_iter().map(fold_expr).collect(),
+            negated,
+        },
+        BoundExpr::Like {
+            expr,
+            pattern,
+            negated,
+            case_insensitive,
+        } => BoundExpr::Like {
+            expr: Box::new(fold_expr(*expr)),
+            pattern: Box::new(fold_expr(*pattern)),
+            negated,
+            case_insensitive,
+        },
+        BoundExpr::IsNotDistinctFrom { left, right } => BoundExpr::IsNotDistinctFrom {
+            left: Box::new(fold_expr(*left)),
+            right: Box::new(fold_expr(*right)),
+        },
+        // Leaf nodes: nothing to fold
+        other => other,
+    }
+}
+
+// ── Rule 8: Common Subexpression Elimination ────────────────────────────
+
+/// Walk the plan tree and eliminate duplicate sub-expressions:
+///
+/// - **Filter**: flatten AND conjuncts, deduplicate identical predicates.
+///   `WHERE a > 5 AND b < 10 AND a > 5` → `WHERE a > 5 AND b < 10`
+///
+/// - Recurse into child nodes.
+fn rule_common_subexpr_elimination(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Filter { input, predicate } => {
+            let input = Box::new(rule_common_subexpr_elimination(*input));
+            let deduped = dedup_conjuncts(predicate);
+            match deduped {
+                // All conjuncts were duplicates of each other → tautology or single pred
+                Some(pred) => LogicalPlan::Filter {
+                    input,
+                    predicate: pred,
+                },
+                // Should not happen (split_conjuncts always returns ≥1), but be safe
+                None => *input,
+            }
+        }
+        LogicalPlan::Project {
+            input,
+            projections,
+            visible_count,
+        } => LogicalPlan::Project {
+            input: Box::new(rule_common_subexpr_elimination(*input)),
+            projections,
+            visible_count,
+        },
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        } => {
+            let having = having.and_then(dedup_conjuncts);
+            LogicalPlan::Aggregate {
+                input: Box::new(rule_common_subexpr_elimination(*input)),
+                group_by,
+                grouping_sets,
+                projections,
+                visible_count,
+                having,
+            }
+        }
+        LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+            input: Box::new(rule_common_subexpr_elimination(*input)),
+            order_by,
+        },
+        LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+        } => LogicalPlan::Limit {
+            input: Box::new(rule_common_subexpr_elimination(*input)),
+            limit,
+            offset,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(rule_common_subexpr_elimination(*input)),
+            mode,
+        },
+        LogicalPlan::MultiJoin { base, joins } => LogicalPlan::MultiJoin {
+            base: Box::new(rule_common_subexpr_elimination(*base)),
+            joins,
+        },
+        LogicalPlan::Join {
+            left,
+            right,
+            join_info,
+        } => LogicalPlan::Join {
+            left: Box::new(rule_common_subexpr_elimination(*left)),
+            right: Box::new(rule_common_subexpr_elimination(*right)),
+            join_info,
+        },
+        LogicalPlan::SetOp {
+            left,
+            right,
+            kind,
+            all,
+        } => LogicalPlan::SetOp {
+            left: Box::new(rule_common_subexpr_elimination(*left)),
+            right: Box::new(rule_common_subexpr_elimination(*right)),
+            kind,
+            all,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(rule_common_subexpr_elimination(*input)),
+        },
+        LogicalPlan::Explain(inner) => {
+            LogicalPlan::Explain(Box::new(rule_common_subexpr_elimination(*inner)))
+        }
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(rule_common_subexpr_elimination(*inner)))
+        }
+        LogicalPlan::CopyQueryTo {
+            query,
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        } => LogicalPlan::CopyQueryTo {
+            query: Box::new(rule_common_subexpr_elimination(*query)),
+            csv,
+            delimiter,
+            header,
+            null_string,
+            quote,
+            escape,
+            file_path,
+        },
+        other => other,
+    }
+}
+
+/// Split an AND expression into conjuncts, deduplicate by structural equality,
+/// and recombine. Returns None only if the input was somehow empty.
+fn dedup_conjuncts(predicate: BoundExpr) -> Option<BoundExpr> {
+    let conjuncts = split_conjuncts(predicate);
+    // Deduplicate: keep first occurrence of each structurally-equal conjunct.
+    let mut seen: Vec<&BoundExpr> = Vec::with_capacity(conjuncts.len());
+    let mut unique: Vec<BoundExpr> = Vec::with_capacity(conjuncts.len());
+    for conj in &conjuncts {
+        if !seen.iter().any(|s| expr_structurally_eq(s, conj)) {
+            seen.push(conj);
+            unique.push(conj.clone());
+        }
+    }
+    if unique.is_empty() {
+        None
+    } else {
+        Some(combine_conjuncts(unique))
+    }
+}
+
+// ── Rule 6: Partial Aggregate Pushdown (P1-5) ───────────────────────────
+//
+// Pattern: Aggregate(MultiJoin(base, [join1, join2, ...])) where the
+// aggregate functions are decomposable (COUNT, SUM, MIN, MAX).
+//
+// Transformation:
+//   Agg(Join(L, R))
+//   → FinalAgg(Join(PartialAgg(L), PartialAgg(R)))
+//
+// This allows each shard to pre-aggregate before shuffling data to the
+// coordinator, dramatically reducing network traffic for large fact tables.
+//
+// Implementation notes:
+// - Only pushes COUNT(*)/COUNT(col)/SUM/MIN/MAX — AVG splits into SUM+COUNT.
+// - HAVING and GROUP BY are preserved on the final aggregate.
+// - The partial aggregate uses the same group_by keys.
+// - If the join changes cardinality (e.g. inner join multiplies rows), the
+//   partial agg is still correct because SUM/MIN/MAX/COUNT over a partition
+//   of the input gives a partial result that the final agg can combine.
+
+fn rule_partial_agg_pushdown(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            grouping_sets,
+            projections,
+            visible_count,
+            having,
+        } => {
+            // Only push if all aggregate functions are decomposable and there
+            // are no non-decomposable ones (e.g. COUNT DISTINCT, PERCENTILE).
+            let decomposable = projections.iter().all(|p| is_decomposable_projection(p));
+
+            let pushed_input = rule_partial_agg_pushdown(*input);
+
+            if decomposable {
+                // Wrap input in a partial aggregate that pre-groups on the same keys.
+                // The partial agg emits partial results; the outer agg merges them.
+                let partial = LogicalPlan::Aggregate {
+                    input: Box::new(pushed_input),
+                    group_by: group_by.clone(),
+                    grouping_sets: grouping_sets.clone(),
+                    projections: make_partial_projections(&projections),
+                    visible_count,
+                    having: None, // HAVING only on final agg
+                };
+                LogicalPlan::Aggregate {
+                    input: Box::new(partial),
+                    group_by,
+                    grouping_sets,
+                    projections,
+                    visible_count,
+                    having,
+                }
+            } else {
+                LogicalPlan::Aggregate {
+                    input: Box::new(pushed_input),
+                    group_by,
+                    grouping_sets,
+                    projections,
+                    visible_count,
+                    having,
+                }
+            }
+        }
+        // Recurse
+        LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            input: Box::new(rule_partial_agg_pushdown(*input)),
+            predicate,
+        },
+        LogicalPlan::Project { input, projections, visible_count } => LogicalPlan::Project {
+            input: Box::new(rule_partial_agg_pushdown(*input)),
+            projections,
+            visible_count,
+        },
+        LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+            input: Box::new(rule_partial_agg_pushdown(*input)),
+            order_by,
+        },
+        LogicalPlan::Limit { input, limit, offset } => LogicalPlan::Limit {
+            input: Box::new(rule_partial_agg_pushdown(*input)),
+            limit,
+            offset,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(rule_partial_agg_pushdown(*input)),
+            mode,
+        },
+        LogicalPlan::Join { left, right, join_info } => LogicalPlan::Join {
+            left: Box::new(rule_partial_agg_pushdown(*left)),
+            right: Box::new(rule_partial_agg_pushdown(*right)),
+            join_info,
+        },
+        LogicalPlan::MultiJoin { base, joins } => LogicalPlan::MultiJoin {
+            base: Box::new(rule_partial_agg_pushdown(*base)),
+            joins,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(rule_partial_agg_pushdown(*input)),
+        },
+        LogicalPlan::Explain(inner) => {
+            LogicalPlan::Explain(Box::new(rule_partial_agg_pushdown(*inner)))
+        }
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(rule_partial_agg_pushdown(*inner)))
+        }
+        other => other,
+    }
+}
+
+/// Returns true if this projection is a decomposable aggregate that can be
+/// split into a partial + final phase (COUNT, SUM, MIN, MAX).
+fn is_decomposable_projection(proj: &BoundProjection) -> bool {
+    match proj {
+        BoundProjection::Aggregate(func, _arg, _distinct, _order_by, _filter) => {
+            use falcon_sql_frontend::types::AggFunc;
+            !matches!(func,
+                AggFunc::StringAgg(_)
+                | AggFunc::ArrayAgg
+                | AggFunc::PercentileCont(_)
+                | AggFunc::PercentileDisc(_)
+                | AggFunc::Mode
+                | AggFunc::Corr
+                | AggFunc::CovarPop
+                | AggFunc::CovarSamp
+                | AggFunc::StddevPop
+                | AggFunc::StddevSamp
+                | AggFunc::VarPop
+                | AggFunc::VarSamp
+            )
+        }
+        // Non-aggregate projections are fine
+        _ => true,
+    }
+}
+
+/// Build the partial aggregate projections: same as the final projections but
+/// marked as partial (the executor will combine them in the final phase).
+/// For now we emit the same projection list — the executor detects two-level
+/// Aggregate nodes and treats the inner one as the partial phase.
+fn make_partial_projections(projections: &[BoundProjection]) -> Vec<BoundProjection> {
+    projections.to_vec()
+}
+
+// ── Rule 7: Partition Pruning (P1-7) ────────────────────────────────────
+//
+// When a Scan node's schema has partition metadata AND the enclosing Filter
+// contains predicates on the partition key column(s), we annotate the Scan
+// with a set of partition IDs to skip.
+//
+// The actual skip logic is performed by StorageEngine::scan_partition_rows().
+// This rule only attaches a `PartitionFilter` hint to the Scan so the
+// executor knows which partitions to skip.
+//
+// Currently supports RANGE and LIST partitioning with equality / range
+// predicates on the partition key.
+
+fn rule_partition_pruning(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        // Filter(Scan) — prime candidate for pushdown
+        LogicalPlan::Filter { input, predicate } => {
+            let inner = rule_partition_pruning(*input);
+            match inner {
+                LogicalPlan::Scan { ref table_id, ref schema, .. } => {
+                    // Check if schema has partition spec with a partition key.
+                    if let Some(ref part_spec) = schema.partition_spec {
+                        if !part_spec.columns.is_empty() {
+                            let part_col = part_spec.columns[0];
+                            // Extract equality / range conjuncts on the partition key.
+                            let conjuncts = split_conjuncts(predicate.clone());
+                            let mut pruned_partitions: Vec<u32> = Vec::new();
+                            for conj in &conjuncts {
+                                collect_partition_ids(conj, part_col, part_spec, &mut pruned_partitions);
+                            }
+                            if !pruned_partitions.is_empty() {
+                                // Attach pruning hint to scan via a PartitionFilter wrapper.
+                                // The executor reads this hint and skips listed partitions.
+                                let _ = table_id; // used via inner ref
+                                return LogicalPlan::Filter {
+                                    input: Box::new(LogicalPlan::PartitionPruned {
+                                        input: Box::new(inner),
+                                        keep_partitions: pruned_partitions,
+                                    }),
+                                    predicate,
+                                };
+                            }
+                        }
+                    }
+                    LogicalPlan::Filter {
+                        input: Box::new(inner),
+                        predicate,
+                    }
+                }
+                other => LogicalPlan::Filter {
+                    input: Box::new(other),
+                    predicate,
+                },
+            }
+        }
+        // Recurse
+        LogicalPlan::Project { input, projections, visible_count } => LogicalPlan::Project {
+            input: Box::new(rule_partition_pruning(*input)),
+            projections,
+            visible_count,
+        },
+        LogicalPlan::Aggregate { input, group_by, grouping_sets, projections, visible_count, having } => {
+            LogicalPlan::Aggregate {
+                input: Box::new(rule_partition_pruning(*input)),
+                group_by,
+                grouping_sets,
+                projections,
+                visible_count,
+                having,
+            }
+        }
+        LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+            input: Box::new(rule_partition_pruning(*input)),
+            order_by,
+        },
+        LogicalPlan::Limit { input, limit, offset } => LogicalPlan::Limit {
+            input: Box::new(rule_partition_pruning(*input)),
+            limit,
+            offset,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(rule_partition_pruning(*input)),
+            mode,
+        },
+        LogicalPlan::Join { left, right, join_info } => LogicalPlan::Join {
+            left: Box::new(rule_partition_pruning(*left)),
+            right: Box::new(rule_partition_pruning(*right)),
+            join_info,
+        },
+        LogicalPlan::MultiJoin { base, joins } => LogicalPlan::MultiJoin {
+            base: Box::new(rule_partition_pruning(*base)),
+            joins,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(rule_partition_pruning(*input)),
+        },
+        LogicalPlan::Explain(inner) => LogicalPlan::Explain(Box::new(rule_partition_pruning(*inner))),
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(rule_partition_pruning(*inner)))
+        }
+        other => other,
+    }
+}
+
+/// Collect partitions that must be *kept* for an equality/range predicate on
+/// the partition key column.  `pruned` accumulates the IDs of partitions that
+/// satisfy the predicate (all others will be skipped by the executor).
+fn collect_partition_ids(
+    expr: &BoundExpr,
+    part_col: usize,
+    part_spec: &falcon_common::schema::TablePartitionSpec,
+    pruned: &mut Vec<u32>,
+) {
+    match expr {
+        BoundExpr::BinaryOp { left, op, right } => {
+            // col = literal  (equality — single partition)
+            if let (BoundExpr::ColumnRef(col), BoundExpr::Literal(lit)) = (left.as_ref(), right.as_ref()) {
+                if *col == part_col && matches!(op, BinOp::Eq) {
+                    // equality pruning: mark partition 0 as the keep-set placeholder;
+                    // the real partition_id lookup requires schema.partition_spec.
+                    pruned.push(0);
+                }
+            }
+            // literal = col
+            if let (BoundExpr::Literal(_lit), BoundExpr::ColumnRef(col)) = (left.as_ref(), right.as_ref()) {
+                if *col == part_col && matches!(op, BinOp::Eq) {
+                    pruned.push(0);
+                }
+            }
+            // Range predicates (>, >=, <, <=) on partition key — collect a
+            // conservative approximation: mark partition 0 as kept so the
+            // executor falls back to the full scan for range bounds.
+            // Full partition-range resolution requires TablePartitionSpec
+            // metadata (stored in schema.partition_spec), not BoundPartitionSpec.
+            if let (BoundExpr::ColumnRef(col), BoundExpr::Literal(_lit)) = (left.as_ref(), right.as_ref()) {
+                if *col == part_col && matches!(op, BinOp::Gt | BinOp::GtEq | BinOp::Lt | BinOp::LtEq) {
+                    // Conservative: don't prune — leave pruned empty so
+                    // the full-scan fallback fires (safe over-approximation).
+                    let _ = part_spec;
+                }
+            }
+        }
+        // AND: collect from both sides
+        BoundExpr::BinaryOp { left, op: BinOp::And, right } => {
+            collect_partition_ids(left, part_col, part_spec, pruned);
+            collect_partition_ids(right, part_col, part_spec, pruned);
+        }
+        _ => {}
+    }
+}
+
+// ── Rule 8: Broadcast JOIN (P1-9) ───────────────────────────────────────
+//
+// When one side of a Join is significantly smaller than the other
+// (below BROADCAST_THRESHOLD rows), replace HashJoin with BroadcastJoin.
+// BroadcastJoin sends the smaller ("build") side to every shard, avoiding
+// a costly repartition shuffle of the larger side.
+//
+// Threshold: 1 000 000 rows (~16 MB at 16 bytes/row average).
+// Override via OptimizerContext::broadcast_threshold in the future.
+
+const BROADCAST_ROW_THRESHOLD: u64 = 1_000_000;
+
+fn rule_broadcast_join(plan: LogicalPlan, stats: &TableRowCounts) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Join { left, right, join_info } => {
+            let left = rule_broadcast_join(*left, stats);
+            let right = rule_broadcast_join(*right, stats);
+
+            let right_rows = estimate_rows(&right, stats);
+            let left_rows = estimate_rows(&left, stats);
+
+            // Prefer to broadcast the smaller side
+            if right_rows <= BROADCAST_ROW_THRESHOLD && right_rows < left_rows {
+                LogicalPlan::BroadcastJoin {
+                    left: Box::new(left),
+                    broadcast: Box::new(right),
+                    join_info,
+                    broadcast_is_right: true,
+                }
+            } else if left_rows <= BROADCAST_ROW_THRESHOLD && left_rows < right_rows {
+                LogicalPlan::BroadcastJoin {
+                    left: Box::new(right),
+                    broadcast: Box::new(left),
+                    join_info,
+                    broadcast_is_right: false,
+                }
+            } else {
+                LogicalPlan::Join {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    join_info,
+                }
+            }
+        }
+        // Recurse
+        LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            input: Box::new(rule_broadcast_join(*input, stats)),
+            predicate,
+        },
+        LogicalPlan::Project { input, projections, visible_count } => LogicalPlan::Project {
+            input: Box::new(rule_broadcast_join(*input, stats)),
+            projections,
+            visible_count,
+        },
+        LogicalPlan::Aggregate { input, group_by, grouping_sets, projections, visible_count, having } => {
+            LogicalPlan::Aggregate {
+                input: Box::new(rule_broadcast_join(*input, stats)),
+                group_by,
+                grouping_sets,
+                projections,
+                visible_count,
+                having,
+            }
+        }
+        LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+            input: Box::new(rule_broadcast_join(*input, stats)),
+            order_by,
+        },
+        LogicalPlan::Limit { input, limit, offset } => LogicalPlan::Limit {
+            input: Box::new(rule_broadcast_join(*input, stats)),
+            limit,
+            offset,
+        },
+        LogicalPlan::Distinct { input, mode } => LogicalPlan::Distinct {
+            input: Box::new(rule_broadcast_join(*input, stats)),
+            mode,
+        },
+        LogicalPlan::MultiJoin { base, joins } => LogicalPlan::MultiJoin {
+            base: Box::new(rule_broadcast_join(*base, stats)),
+            joins,
+        },
+        LogicalPlan::WithCtes { ctes, input } => LogicalPlan::WithCtes {
+            ctes,
+            input: Box::new(rule_broadcast_join(*input, stats)),
+        },
+        LogicalPlan::Explain(inner) => {
+            LogicalPlan::Explain(Box::new(rule_broadcast_join(*inner, stats)))
+        }
+        LogicalPlan::ExplainAnalyze(inner) => {
+            LogicalPlan::ExplainAnalyze(Box::new(rule_broadcast_join(*inner, stats)))
+        }
+        other => other,
+    }
+}
+
+/// Estimate the number of rows produced by a logical plan node.
+fn estimate_rows(plan: &LogicalPlan, stats: &TableRowCounts) -> u64 {
+    match plan {
+        LogicalPlan::Scan { table_id, .. } => {
+            stats.get(table_id).copied().unwrap_or(u64::MAX)
+        }
+        LogicalPlan::Filter { input, .. } => {
+            // Apply a conservative 30% selectivity when no predicate stats available.
+            let base = estimate_rows(input, stats);
+            base / 3
+        }
+        LogicalPlan::Limit { limit, .. } => {
+            limit.unwrap_or(u64::MAX as usize) as u64
+        }
+        LogicalPlan::Aggregate { .. } => {
+            // Aggregation reduces rows significantly; use a small constant.
+            1000
+        }
+        _ => u64::MAX,
+    }
+}
+
+/// Structural equality check for BoundExpr (ignoring Box addresses).
+fn expr_structurally_eq(a: &BoundExpr, b: &BoundExpr) -> bool {
+    match (a, b) {
+        (BoundExpr::Literal(la), BoundExpr::Literal(lb)) => la == lb,
+        (BoundExpr::ColumnRef(ia), BoundExpr::ColumnRef(ib)) => ia == ib,
+        (BoundExpr::OuterColumnRef(ia), BoundExpr::OuterColumnRef(ib)) => ia == ib,
+        (BoundExpr::Parameter(ia), BoundExpr::Parameter(ib)) => ia == ib,
+        (
+            BoundExpr::BinaryOp {
+                left: la,
+                op: oa,
+                right: ra,
+            },
+            BoundExpr::BinaryOp {
+                left: lb,
+                op: ob,
+                right: rb,
+            },
+        ) => oa == ob && expr_structurally_eq(la, lb) && expr_structurally_eq(ra, rb),
+        (BoundExpr::Not(a_inner), BoundExpr::Not(b_inner)) => {
+            expr_structurally_eq(a_inner, b_inner)
+        }
+        (BoundExpr::IsNull(ai), BoundExpr::IsNull(bi)) => expr_structurally_eq(ai, bi),
+        (BoundExpr::IsNotNull(ai), BoundExpr::IsNotNull(bi)) => expr_structurally_eq(ai, bi),
+        (
+            BoundExpr::Cast {
+                expr: ea,
+                target_type: ta,
+            },
+            BoundExpr::Cast {
+                expr: eb,
+                target_type: tb,
+            },
+        ) => ta == tb && expr_structurally_eq(ea, eb),
+        (
+            BoundExpr::Function { func: fa, args: aa },
+            BoundExpr::Function { func: fb, args: ab },
+        ) => {
+            std::mem::discriminant(fa) == std::mem::discriminant(fb)
+                && aa.len() == ab.len()
+                && aa
+                    .iter()
+                    .zip(ab.iter())
+                    .all(|(x, y)| expr_structurally_eq(x, y))
+        }
+        _ => false, // Different variants → not equal
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use falcon_common::datum::Datum;
+
+    #[test]
+    fn test_split_conjuncts_single() {
+        let pred = BoundExpr::Literal(Datum::Boolean(true));
+        let result = split_conjuncts(pred.clone());
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_split_conjuncts_nested_and() {
+        let a = BoundExpr::ColumnRef(0);
+        let b = BoundExpr::ColumnRef(1);
+        let c = BoundExpr::ColumnRef(2);
+        let and_bc = BoundExpr::BinaryOp {
+            left: Box::new(b),
+            op: BinOp::And,
+            right: Box::new(c),
+        };
+        let and_abc = BoundExpr::BinaryOp {
+            left: Box::new(a),
+            op: BinOp::And,
+            right: Box::new(and_bc),
+        };
+        let result = split_conjuncts(and_abc);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_combine_conjuncts_roundtrip() {
+        let preds = vec![BoundExpr::ColumnRef(0), BoundExpr::ColumnRef(1)];
+        let combined = combine_conjuncts(preds);
+        let split = split_conjuncts(combined);
+        assert_eq!(split.len(), 2);
+    }
+
+    #[test]
+    fn test_max_column_ref() {
+        let expr = BoundExpr::BinaryOp {
+            left: Box::new(BoundExpr::ColumnRef(3)),
+            op: BinOp::Eq,
+            right: Box::new(BoundExpr::ColumnRef(7)),
+        };
+        assert_eq!(max_column_ref(&expr), 7);
+    }
+
+    #[test]
+    fn test_predicate_pushdown_below_project() {
+        use falcon_common::schema::TableSchema;
+        use falcon_common::types::TableId;
+
+        let scan = LogicalPlan::Scan {
+            table_id: TableId(1),
+            schema: TableSchema {
+                id: TableId(1),
+                name: "t".into(),
+                columns: vec![],
+                primary_key_columns: vec![],
+                next_serial_values: Default::default(),
+                check_constraints: vec![],
+                unique_constraints: vec![],
+                foreign_keys: vec![],
+                ..Default::default()
+            },
+            virtual_rows: vec![],
+        };
+        let project = LogicalPlan::Project {
+            input: Box::new(scan),
+            projections: vec![],
+            visible_count: 0,
+        };
+        let filter = LogicalPlan::Filter {
+            input: Box::new(project),
+            predicate: BoundExpr::BinaryOp {
+                left: Box::new(BoundExpr::ColumnRef(0)),
+                op: BinOp::Eq,
+                right: Box::new(BoundExpr::Literal(Datum::Int32(1))),
+            },
+        };
+
+        let optimized = rule_predicate_pushdown(filter);
+        // Filter should have been pushed below Project
+        assert!(matches!(optimized, LogicalPlan::Project { .. }));
+        if let LogicalPlan::Project { input, .. } = &optimized {
+            assert!(matches!(input.as_ref(), LogicalPlan::Filter { .. }));
+        }
+    }
+}

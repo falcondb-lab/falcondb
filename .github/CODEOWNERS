@@ -1,0 +1,30 @@
+# FalconDB Code Owners
+# Each line is a file pattern followed by one or more owners.
+# Order matters — last matching pattern takes precedence.
+
+# Default: core team reviews everything
+*                           @falcondb-lab/core
+
+# Storage engine & WAL
+crates/falcon_storage/      @falcondb-lab/storage
+crates/falcon_txn/          @falcondb-lab/storage
+
+# SQL frontend & planner
+crates/falcon_sql_frontend/ @falcondb-lab/sql
+crates/falcon_planner/      @falcondb-lab/sql
+crates/falcon_executor/     @falcondb-lab/sql
+
+# Protocol & networking
+crates/falcon_protocol_pg/  @falcondb-lab/protocol
+crates/falcon_cluster/      @falcondb-lab/cluster
+crates/falcon_proto/        @falcondb-lab/cluster
+crates/falcon_raft/         @falcondb-lab/cluster
+
+# CI & infrastructure
+.github/                    @falcondb-lab/infra
+scripts/                    @falcondb-lab/infra
+Cargo.toml                  @falcondb-lab/core
+
+# Documentation
+*.md                        @falcondb-lab/core
+docs/                       @falcondb-lab/core

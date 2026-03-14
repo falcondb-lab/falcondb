@@ -1,0 +1,38 @@
+# FalconDB Node 3 — Raft cluster member
+
+[server]
+pg_listen_addr = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:8080"
+node_id = 3
+max_connections = 256
+statement_timeout_ms = 30000
+
+[storage]
+wal_enabled = true
+data_dir = "/var/lib/falcondb"
+
+[wal]
+group_commit = true
+flush_interval_us = 500
+sync_mode = "fdatasync"
+segment_size_bytes = 67108864
+
+[auth]
+method = "trust"
+
+[replication]
+role = "raft_member"
+shard_count = 1
+
+[raft]
+node_id = 3
+node_ids = [1, 2, 3]
+raft_listen_addr = "0.0.0.0:50052"
+peers = ["1=http://node1:50052", "2=http://node2:50052"]
+heartbeat_interval_ms = 50
+election_timeout_min_ms = 150
+election_timeout_max_ms = 300
+failover_poll_interval_ms = 200
+
+[gc]
+enabled = false

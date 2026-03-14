@@ -1,0 +1,20 @@
+config_version = 5
+
+[server]
+pg_listen_addr    = "0.0.0.0:5433"
+admin_listen_addr = "0.0.0.0:8080"
+node_id           = 1
+max_connections   = 128
+
+[storage]
+wal_enabled    = true
+data_dir       = "./pitr_data"
+default_engine = "rowstore"
+
+[wal]
+group_commit      = true
+flush_interval_us = 1000
+sync_mode         = "fdatasync"
+
+[gc]
+enabled = true

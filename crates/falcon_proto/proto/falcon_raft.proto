@@ -1,0 +1,140 @@
+syntax = "proto3";
+
+package falcon.raft;
+
+// ---------------------------------------------------------------------------
+// Raft Transport Service — Multi-node Raft RPC
+//
+// Provides the on-the-wire protocol for openraft inter-node communication:
+//   - AppendEntries (includes heartbeat as empty entries)
+//   - RequestVote
+//   - InstallSnapshot (chunked streaming)
+// ---------------------------------------------------------------------------
+
+service RaftTransport {
+  // Leader → follower: append log entries (or heartbeat if entries empty).
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+
+  // Candidate → all: request vote during leader election.
+  rpc RequestVote(VoteRequest) returns (VoteResponse);
+
+  // Leader → follower: install snapshot for lagging follower.
+  // Uses chunked streaming to avoid OOM on large snapshots.
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+
+  // Leader → follower: stream full snapshot in chunks.
+  // Client streams snapshot chunks; server acks at the end.
+  rpc StreamSnapshot(stream SnapshotChunk) returns (SnapshotStreamResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Common Types
+// ---------------------------------------------------------------------------
+
+message LogIdProto {
+  uint64 leader_id = 1;
+  uint64 term = 2;
+  uint64 index = 3;
+}
+
+message VoteProto {
+  uint64 leader_id = 1;
+  uint64 term = 2;
+  bool committed = 3;
+}
+
+message EntryProto {
+  uint64 term = 1;
+  uint64 index = 2;
+  // Serialized openraft Entry (bincode).
+  bytes payload = 3;
+}
+
+message NodeProto {
+  uint64 node_id = 1;
+  string addr = 2;
+}
+
+message MembershipProto {
+  // Serialized openraft Membership (bincode).
+  bytes data = 1;
+}
+
+// ---------------------------------------------------------------------------
+// AppendEntries RPC
+// ---------------------------------------------------------------------------
+
+message AppendEntriesRequest {
+  VoteProto vote = 1;
+  optional LogIdProto prev_log_id = 2;
+  repeated EntryProto entries = 3;
+  optional LogIdProto leader_commit = 4;
+}
+
+message AppendEntriesResponse {
+  // Serialized openraft AppendEntriesResponse (bincode).
+  // We serialize the whole response to avoid re-encoding the complex enum.
+  bytes data = 1;
+}
+
+// ---------------------------------------------------------------------------
+// RequestVote RPC
+// ---------------------------------------------------------------------------
+
+message VoteRequest {
+  VoteProto vote = 1;
+  optional LogIdProto last_log_id = 2;
+}
+
+message VoteResponse {
+  // Serialized openraft VoteResponse (bincode).
+  bytes data = 1;
+}
+
+// ---------------------------------------------------------------------------
+// InstallSnapshot RPC (single-message, for small snapshots)
+// ---------------------------------------------------------------------------
+
+message InstallSnapshotRequest {
+  // Serialized openraft InstallSnapshotRequest (bincode).
+  bytes data = 1;
+}
+
+message InstallSnapshotResponse {
+  // Serialized openraft InstallSnapshotResponse (bincode).
+  bytes data = 1;
+}
+
+// ---------------------------------------------------------------------------
+// StreamSnapshot (chunked, for large snapshots)
+// ---------------------------------------------------------------------------
+
+message SnapshotChunk {
+  // Snapshot metadata (only in first chunk).
+  SnapshotMeta meta = 1;
+  // Chunk offset (byte position in the snapshot).
+  uint64 offset = 2;
+  // Chunk data.
+  bytes data = 3;
+  // True if this is the last chunk.
+  bool done = 4;
+  // Chunk sequence number (0-indexed).
+  uint32 chunk_index = 5;
+  // CRC32 of this chunk's data.
+  uint32 chunk_checksum = 6;
+}
+
+message SnapshotMeta {
+  string snapshot_id = 1;
+  optional LogIdProto last_log_id = 2;
+  // Serialized StoredMembership (bincode).
+  bytes last_membership = 3;
+}
+
+message SnapshotStreamResponse {
+  VoteProto vote = 1;
+  bool success = 2;
+  string error_message = 3;
+  // Total bytes received.
+  uint64 bytes_received = 4;
+}

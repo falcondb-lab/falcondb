@@ -1,0 +1,106 @@
+[
+  {
+    "feature": "CREATE INDEX CONCURRENTLY",
+    "impact": "medium",
+    "status": "not supported",
+    "affected_sql": "CREATE INDEX CONCURRENTLY idx_name ON table (col);",
+    "workaround": "Use regular CREATE INDEX (briefly blocks writes)",
+    "roadmap": "v1.x"
+  },
+  {
+    "feature": "FOREIGN KEY constraints",
+    "impact": "medium",
+    "status": "parsed but not enforced",
+    "affected_sql": "REFERENCES other_table(id)",
+    "workaround": "Enforce referential integrity in application logic",
+    "roadmap": "v1.x"
+  },
+  {
+    "feature": "CHECK constraints",
+    "impact": "low",
+    "status": "not supported",
+    "affected_sql": "CHECK (amount > 0)",
+    "workaround": "Validate in application before INSERT/UPDATE",
+    "roadmap": "v1.x"
+  },
+  {
+    "feature": "TRIGGER / CREATE TRIGGER",
+    "impact": "high",
+    "status": "not supported",
+    "affected_sql": "CREATE TRIGGER trg AFTER INSERT ON orders ...",
+    "workaround": "Move trigger logic to application layer",
+    "roadmap": "v2.x"
+  },
+  {
+    "feature": "Stored Procedures (PL/pgSQL)",
+    "impact": "high",
+    "status": "not supported",
+    "affected_sql": "CREATE FUNCTION ... LANGUAGE plpgsql",
+    "workaround": "Rewrite as application code",
+    "roadmap": "v2.x"
+  },
+  {
+    "feature": "LISTEN / NOTIFY",
+    "impact": "medium",
+    "status": "not supported",
+    "affected_sql": "LISTEN channel; NOTIFY channel, 'payload';",
+    "workaround": "Use application-level pub/sub (Redis, NATS, etc.)",
+    "roadmap": "no current plan"
+  },
+  {
+    "feature": "MATERIALIZED VIEW",
+    "impact": "low",
+    "status": "not supported",
+    "affected_sql": "CREATE MATERIALIZED VIEW mv AS SELECT ...;",
+    "workaround": "Use regular VIEW or application-level caching",
+    "roadmap": "v1.x"
+  },
+  {
+    "feature": "Declarative Partitioning (PARTITION BY)",
+    "impact": "medium",
+    "status": "not supported",
+    "affected_sql": "CREATE TABLE t (...) PARTITION BY RANGE (created_at);",
+    "workaround": "Use FalconDB native sharding or application-level partitioning",
+    "roadmap": "v2.x"
+  },
+  {
+    "feature": "ENUM types",
+    "impact": "low",
+    "status": "not supported",
+    "affected_sql": "CREATE TYPE status AS ENUM ('pending', 'active');",
+    "workaround": "Use TEXT column with application-level validation",
+    "roadmap": "v1.x"
+  },
+  {
+    "feature": "Multi-column indexes",
+    "impact": "low",
+    "status": "not supported",
+    "affected_sql": "CREATE INDEX idx ON t (col1, col2);",
+    "workaround": "Create separate single-column indexes",
+    "roadmap": "v1.x"
+  },
+  {
+    "feature": "Expression indexes",
+    "impact": "low",
+    "status": "not supported",
+    "affected_sql": "CREATE INDEX idx ON t (LOWER(email));",
+    "workaround": "Add a computed column or filter in application",
+    "roadmap": "v1.x"
+  },
+  {
+    "feature": "PostgreSQL Extensions (pg_trgm, PostGIS, etc.)",
+    "impact": "varies",
+    "status": "not supported",
+    "affected_sql": "CREATE EXTENSION pg_trgm;",
+    "workaround": "Use application-level alternatives",
+    "roadmap": "no current plan"
+  },
+  {
+    "feature": "information_schema",
+    "impact": "low",
+    "status": "partial",
+    "affected_sql": "SELECT * FROM information_schema.tables;",
+    "workaround": "Use SHOW TABLES, SHOW SEQUENCES",
+    "roadmap": "v1.x"
+  }
+]

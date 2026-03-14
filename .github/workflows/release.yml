@@ -1,0 +1,170 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate-tag:
+    name: Validate Tag vs Cargo.toml
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: extract
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "Tag version:   $TAG_VERSION"
+          echo "Cargo version: $CARGO_VERSION"
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "FAIL: Tag $TAG_VERSION does not match Cargo.toml $CARGO_VERSION"
+            exit 1
+          fi
+          echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    name: Build Linux
+    needs: [validate-tag]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --workspace
+      - run: cargo test --workspace
+      - name: Package tarball
+        run: |
+          chmod +x scripts/build/build_linux_dist.sh
+          ./scripts/build/build_linux_dist.sh
+      - name: Package .deb
+        run: |
+          chmod +x scripts/build/build_deb.sh
+          ./scripts/build/build_deb.sh
+      - name: Package .rpm
+        run: |
+          sudo apt-get update && sudo apt-get install -y rpm
+          chmod +x scripts/build/build_rpm.sh
+          ./scripts/build/build_rpm.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: |
+            target/dist/falcondb-*.tar.gz
+            target/dist/falcondb_*.deb
+            target/dist/falcondb-*.rpm
+
+  build-macos:
+    name: Build macOS
+    needs: [validate-tag]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --workspace
+      - run: cargo test --workspace
+      - name: Package tarball
+        run: |
+          VERSION=${{ needs.validate-tag.outputs.version }}
+          mkdir -p target/dist
+          tar czf target/dist/falcondb-${VERSION}-macos-x86_64.tar.gz \
+            -C target/release falcon_server falcon_cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dist
+          path: target/dist/falcondb-*.tar.gz
+
+  build-windows:
+    name: Build Windows
+    needs: [validate-tag]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --workspace
+      - run: cargo test --workspace
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          $Version = "${{ needs.validate-tag.outputs.version }}"
+          .\scripts\build_windows_dist.ps1 -Release -SkipBuild
+          Rename-Item "target\dist\FalconDB-windows-x86_64.zip" "FalconDB-${Version}-windows-x86_64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: target/dist/FalconDB-*.zip
+
+  docker:
+    name: Docker Build & Push
+    needs: [validate-tag]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        if: env.HAS_DOCKERHUB == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        env:
+          HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+            falcondb/falcondb
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Create Release
+    needs: [validate-tag, build-linux, build-macos, build-windows, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts/
+      - name: Extract Release Notes
+        run: |
+          VERSION=${{ needs.validate-tag.outputs.version }}
+          # Extract section for this version from CHANGELOG.md
+          awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found" CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release v${VERSION}" > release-notes.md
+          fi
+      - uses: softprops/action-gh-release@v1
+        with:
+          body_path: release-notes.md
+          files: artifacts/*
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

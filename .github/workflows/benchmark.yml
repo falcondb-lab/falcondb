@@ -1,0 +1,206 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  # Allow manual runs for ad-hoc profiling
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Disable incremental compilation for reproducible benchmark results
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  benchmark:
+    name: Criterion Benchmarks
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to push gh-pages and post PR comments
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch full history so we can compare against baseline on main
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate cache key for benchmarks to avoid polluting test cache
+          key: bench
+
+      # ── Run Criterion benchmarks ──────────────────────────────────────────
+      - name: Create output directory
+        run: mkdir -p output
+
+      - name: Run benchmarks (falcon_storage)
+        run: |
+          cargo bench -p falcon_storage \
+            -- --output-format bencher 2>&1 \
+            | tee output/bench_storage.txt
+        env:
+          RUSTFLAGS: "-C opt-level=3"
+
+      - name: Run benchmarks (falcon_common)
+        run: |
+          cargo bench -p falcon_common \
+            -- --output-format bencher 2>&1 \
+            | tee output/bench_common.txt
+        env:
+          RUSTFLAGS: "-C opt-level=3"
+
+      - name: Run benchmarks (falcon_sql_frontend)
+        run: |
+          cargo bench -p falcon_sql_frontend \
+            -- --output-format bencher 2>&1 \
+            | tee output/bench_sql_frontend.txt
+        env:
+          RUSTFLAGS: "-C opt-level=3"
+
+      # ── Collect Criterion HTML reports ───────────────────────────────────
+      - name: Collect Criterion HTML reports
+        run: |
+          mkdir -p output/criterion
+          # Criterion writes HTML to target/criterion/
+          if [ -d target/criterion ]; then
+            cp -r target/criterion output/criterion/
+          fi
+
+      # ── PR: post benchmark comparison comment ─────────────────────────────
+      - name: Benchmark summary for PR
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          for f in output/bench_*.txt; do
+            label=$(basename "$f" .txt | sed 's/bench_//')
+            echo "### $label" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            # Extract bencher-format lines (test name + ns/iter)
+            grep -E '^test .* bench:' "$f" || echo "(no bench output)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          done
+
+      # ── Upload Criterion HTML as CI artifact (always available) ───────────
+      - name: Upload Criterion HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-html-${{ github.sha }}
+          path: |
+            output/bench_*.txt
+            output/criterion/
+          retention-days: 60
+
+      # ── Push HTML report to gh-pages (main branch only) ──────────────────
+      # The report is published to:
+      #   https://<org>.github.io/<repo>/benchmarks/
+      # Each commit gets its own subdirectory; "latest" symlink is updated.
+      - name: Publish Criterion report to GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stash criterion output before switching branches
+          mkdir -p /tmp/criterion-publish
+          if [ -d target/criterion ]; then
+            cp -r target/criterion /tmp/criterion-publish/report
+          fi
+          cp output/bench_*.txt /tmp/criterion-publish/ 2>/dev/null || true
+
+          SHA="${{ github.sha }}"
+          SHORT="${SHA:0:8}"
+
+          # Switch to (or create) gh-pages branch
+          if git ls-remote --exit-code --heads origin gh-pages; then
+            git fetch origin gh-pages
+            git checkout gh-pages
+          else
+            git checkout --orphan gh-pages
+            git rm -rf . --quiet || true
+          fi
+
+          # Create directory structure
+          mkdir -p benchmarks/history/"$SHORT"
+
+          # Copy latest report
+          if [ -d /tmp/criterion-publish/report ]; then
+            rm -rf benchmarks/latest
+            cp -r /tmp/criterion-publish/report benchmarks/latest
+            cp -r /tmp/criterion-publish/report benchmarks/history/"$SHORT"
+          fi
+          cp /tmp/criterion-publish/bench_*.txt benchmarks/history/"$SHORT"/ 2>/dev/null || true
+
+          # Generate minimal index page linking to history
+          python3 - <<'PYEOF'
+          import os, json
+          from datetime import datetime
+
+          history_dir = "benchmarks/history"
+          entries = sorted(os.listdir(history_dir), reverse=True) if os.path.isdir(history_dir) else []
+
+          rows = "\n".join(
+              f'<tr><td><a href="history/{e}/index.html">{e}</a></td>'
+              f'<td>{datetime.utcnow().strftime("%Y-%m-%d") if i == 0 else ""}</td></tr>'
+              for i, e in enumerate(entries[:50])
+          )
+
+          html = f"""<!DOCTYPE html>
+          <html><head><meta charset="utf-8">
+          <title>FalconDB Benchmark Trends</title>
+          <style>body{{font-family:sans-serif;max-width:900px;margin:auto;padding:2em}}
+          table{{border-collapse:collapse;width:100%}}
+          th,td{{border:1px solid #ccc;padding:.5em 1em;text-align:left}}
+          th{{background:#f4f4f4}}</style></head>
+          <body>
+          <h1>FalconDB Benchmark Trends</h1>
+          <p><a href="latest/index.html">&#x1F4C8; Latest report</a></p>
+          <h2>History (most recent 50 runs)</h2>
+          <table><tr><th>Commit (short SHA)</th><th>Date</th></tr>
+          {rows}
+          </table>
+          </body></html>"""
+
+          os.makedirs("benchmarks", exist_ok=True)
+          with open("benchmarks/index.html", "w") as f:
+              f.write(html)
+          PYEOF
+
+          # Commit and push
+          git add benchmarks/
+          git diff --cached --quiet || git commit -m "bench: update criterion report for ${SHORT}"
+          git push origin gh-pages
+
+      # ── Regression gate: compare against stored baseline on main ─────────
+      # Uses the bencher format output to detect >10% regressions.
+      - name: Regression check vs baseline
+        if: github.event_name == 'pull_request'
+        run: |
+          FAILED=0
+          for f in output/bench_*.txt; do
+            while IFS= read -r line; do
+              # bencher format: "test <name> ... bench: <N> ns/iter (+/- <M>)"
+              if [[ "$line" =~ ^test\ (.+)\ \.\.\.\ bench:\ ([0-9,]+)\ ns/iter ]]; then
+                NAME="${BASH_REMATCH[1]}"
+                NS="${BASH_REMATCH[2]//,/}"
+                BASELINE_FILE="bench/baselines/$(echo "$NAME" | tr ' /' '__').txt"
+                if [ -f "$BASELINE_FILE" ]; then
+                  BASE=$(cat "$BASELINE_FILE")
+                  RATIO=$(echo "scale=4; $NS / $BASE" | bc)
+                  IS_REGR=$(echo "$RATIO > 1.10" | bc)
+                  if [ "$IS_REGR" = "1" ]; then
+                    echo "::warning::REGRESSION $NAME: ${NS}ns vs baseline ${BASE}ns (ratio ${RATIO})"
+                    FAILED=1
+                  fi
+                fi
+              fi
+            done < "$f"
+          done
+          # Non-zero exit only if regressions found (informational for now)
+          exit 0

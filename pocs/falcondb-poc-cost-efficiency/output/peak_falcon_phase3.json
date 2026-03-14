@@ -1,0 +1,17 @@
+{
+  "label": "falcon_peak_recovery",
+  "host": "127.0.0.1",
+  "port": 5433,
+  "target_rate": 1000,
+  "actual_rate": 965.1,
+  "duration_sec": 5,
+  "total_committed": 4831,
+  "total_errors": 0,
+  "latency_min_us": 345,
+  "latency_max_us": 2669,
+  "latency_avg_us": 571,
+  "latency_p50_us": 535,
+  "latency_p95_us": 835,
+  "latency_p99_us": 1162,
+  "timestamp": "2026-03-04T08:50:50.992638+00:00"
+}

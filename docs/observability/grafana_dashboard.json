@@ -1,0 +1,390 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Cluster Health Overview",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "title": "Cluster Health Status",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "targets": [{ "expr": "falcon_cluster_health_status", "legendFormat": "status" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Healthy", "color": "green" }, "1": { "text": "Degraded", "color": "yellow" }, "2": { "text": "Critical", "color": "red" } } }
+          ],
+          "thresholds": { "steps": [{ "value": null, "color": "green" }, { "value": 1, "color": "yellow" }, { "value": 2, "color": "red" }] }
+        }
+      }
+    },
+    {
+      "title": "Alive Nodes / Total",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "targets": [
+        { "expr": "falcon_cluster_alive_nodes", "legendFormat": "alive" },
+        { "expr": "falcon_cluster_total_nodes", "legendFormat": "total" }
+      ]
+    },
+    {
+      "title": "Shards With Leader / Total",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "targets": [
+        { "expr": "falcon_cluster_shards_with_leader", "legendFormat": "with leader" },
+        { "expr": "falcon_cluster_total_shards", "legendFormat": "total" }
+      ]
+    },
+    {
+      "title": "Max Replication Lag (ms)",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "targets": [{ "expr": "falcon_cluster_replication_lag_max_ms", "legendFormat": "lag" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "value": null, "color": "green" }, { "value": 500, "color": "yellow" }, { "value": 2000, "color": "red" }] },
+          "unit": "ms", "max": 5000
+        }
+      }
+    },
+    {
+      "title": "Topology Epoch",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "targets": [{ "expr": "falcon_topology_current_epoch", "legendFormat": "epoch" }]
+    },
+    {
+      "title": "Memory Pressure",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "targets": [{ "expr": "falcon_memory_pressure_state", "legendFormat": "pressure" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Normal", "color": "green" }, "1": { "text": "Pressure", "color": "yellow" }, "2": { "text": "Critical", "color": "red" } } }
+          ]
+        }
+      }
+    },
+    {
+      "title": "Query Performance",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+    {
+      "title": "Query Rate (QPS)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 6 },
+      "targets": [
+        { "expr": "rate(falcon_queries_total[1m])", "legendFormat": "{{type}} ({{success}})" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Query Latency p50/p99 (μs)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(falcon_query_duration_us_bucket[5m]))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.99, rate(falcon_query_duration_us_bucket[5m]))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "µs" } }
+    },
+    {
+      "title": "Active Connections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 6 },
+      "targets": [
+        { "expr": "falcon_active_connections", "legendFormat": "connections" }
+      ]
+    },
+    {
+      "title": "Transaction Metrics",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false
+    },
+    {
+      "title": "Transaction Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 15 },
+      "targets": [
+        { "expr": "rate(falcon_txn_total[1m])", "legendFormat": "{{action}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Txn Fast/Slow Path",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 15 },
+      "targets": [
+        { "expr": "falcon_txn_fast_path_commits", "legendFormat": "fast path" },
+        { "expr": "falcon_txn_slow_path_commits", "legendFormat": "slow path" },
+        { "expr": "falcon_txn_occ_conflicts", "legendFormat": "OCC conflicts" }
+      ]
+    },
+    {
+      "title": "SLA Latency (p99 μs)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 15 },
+      "targets": [
+        { "expr": "falcon_sla_high_p99_us", "legendFormat": "high priority" },
+        { "expr": "falcon_sla_normal_p99_us", "legendFormat": "normal" },
+        { "expr": "falcon_sla_bg_p99_us", "legendFormat": "background" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "µs" } }
+    },
+    {
+      "title": "Gateway Routing",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "collapsed": false
+    },
+    {
+      "title": "Request Classification",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "targets": [
+        { "expr": "falcon_gateway_local_exec_total", "legendFormat": "local exec" },
+        { "expr": "falcon_gateway_forward_total", "legendFormat": "forward" },
+        { "expr": "falcon_gateway_reject_overloaded_total", "legendFormat": "reject (overloaded)" },
+        { "expr": "falcon_gateway_reject_no_route_total", "legendFormat": "reject (no route)" }
+      ]
+    },
+    {
+      "title": "Gateway Inflight & Forwarded",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "targets": [
+        { "expr": "falcon_gateway_inflight", "legendFormat": "inflight" },
+        { "expr": "falcon_gateway_forwarded", "legendFormat": "forwarded" },
+        { "expr": "falcon_gateway_forward_failed_total", "legendFormat": "forward failed" }
+      ]
+    },
+    {
+      "title": "Topology Cache Hit Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "targets": [
+        { "expr": "falcon_topology_cache_hits / (falcon_topology_cache_hits + falcon_topology_cache_misses + 1)", "legendFormat": "hit rate" },
+        { "expr": "falcon_topology_invalidations", "legendFormat": "invalidations" },
+        { "expr": "falcon_topology_leader_changes", "legendFormat": "leader changes" }
+      ]
+    },
+    {
+      "title": "Client Discovery",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "collapsed": false
+    },
+    {
+      "title": "Discovery Subscriptions",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 33 },
+      "targets": [
+        { "expr": "falcon_discovery_active_subscriptions", "legendFormat": "active" },
+        { "expr": "falcon_discovery_events_published", "legendFormat": "published" },
+        { "expr": "falcon_discovery_events_delivered", "legendFormat": "delivered" },
+        { "expr": "falcon_discovery_events_dropped", "legendFormat": "dropped" }
+      ]
+    },
+    {
+      "title": "Client Connection Failovers",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 33 },
+      "targets": [
+        { "expr": "falcon_client_conn_failovers_total", "legendFormat": "failovers" },
+        { "expr": "falcon_client_conn_connects_total", "legendFormat": "connects" },
+        { "expr": "falcon_client_conn_failures_total", "legendFormat": "failures" }
+      ]
+    },
+    {
+      "title": "NOT_LEADER Redirector",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 33 },
+      "targets": [
+        { "expr": "falcon_redirector_attempts_total", "legendFormat": "attempts" },
+        { "expr": "falcon_redirector_successes_total", "legendFormat": "successes" },
+        { "expr": "falcon_redirector_budget_exhausted_total", "legendFormat": "budget exhausted" },
+        { "expr": "falcon_redirector_hints_applied_total", "legendFormat": "hints applied" }
+      ]
+    },
+    {
+      "title": "Epoch & Fencing",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "collapsed": false
+    },
+    {
+      "title": "Epoch Fence Checks",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 42 },
+      "targets": [
+        { "expr": "falcon_epoch_fence_accepted_total", "legendFormat": "accepted" },
+        { "expr": "falcon_epoch_fence_rejections_total", "legendFormat": "rejected (stale)" }
+      ]
+    },
+    {
+      "title": "Shard Migrations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 42 },
+      "targets": [
+        { "expr": "falcon_shard_migration_active", "legendFormat": "active" },
+        { "expr": "falcon_shard_migration_completed_total", "legendFormat": "completed" },
+        { "expr": "falcon_shard_migration_failed_total", "legendFormat": "failed" },
+        { "expr": "falcon_shard_migration_rolled_back_total", "legendFormat": "rolled back" }
+      ]
+    },
+    {
+      "title": "2PC Decision Log",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 42 },
+      "targets": [
+        { "expr": "falcon_2pc_decision_log_total_logged", "legendFormat": "logged" },
+        { "expr": "falcon_2pc_decision_log_total_applied", "legendFormat": "applied" },
+        { "expr": "falcon_2pc_decision_log_unapplied", "legendFormat": "unapplied" }
+      ]
+    },
+    {
+      "title": "Replication Streaming",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 50 },
+      "collapsed": false
+    },
+    {
+      "title": "Segment Streaming Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 51 },
+      "targets": [
+        { "expr": "rate(falcon_repl_segments_streamed_total[5m])", "legendFormat": "segments/s" },
+        { "expr": "rate(falcon_repl_handshakes_total[5m])", "legendFormat": "handshakes/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Segment Streaming Bytes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 51 },
+      "targets": [
+        { "expr": "rate(falcon_repl_segment_bytes_total[5m])", "legendFormat": "segment bytes/s" },
+        { "expr": "rate(falcon_repl_tail_bytes_total[5m])", "legendFormat": "tail bytes/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
+    },
+    {
+      "title": "Streaming Errors",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 51 },
+      "targets": [
+        { "expr": "falcon_repl_checksum_failures_total", "legendFormat": "checksum failures" },
+        { "expr": "falcon_repl_error_rollbacks_total", "legendFormat": "error rollbacks" },
+        { "expr": "falcon_repl_snapshots_created_total", "legendFormat": "snapshots created" }
+      ]
+    },
+    {
+      "title": "Shard Rebalancer",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 59 },
+      "collapsed": false
+    },
+    {
+      "title": "Rebalancer Status",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 60 },
+      "targets": [
+        { "expr": "falcon_rebalancer_running", "legendFormat": "running" },
+        { "expr": "falcon_rebalancer_paused", "legendFormat": "paused" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "No", "color": "green" }, "1": { "text": "Yes", "color": "yellow" } } }
+          ]
+        }
+      }
+    },
+    {
+      "title": "Imbalance Ratio",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 60 },
+      "targets": [{ "expr": "falcon_rebalancer_imbalance_ratio", "legendFormat": "ratio" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "value": null, "color": "green" }, { "value": 1.25, "color": "yellow" }, { "value": 2.0, "color": "red" }] },
+          "min": 1.0, "max": 4.0
+        }
+      }
+    },
+    {
+      "title": "Rebalancer Throughput",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 60 },
+      "targets": [
+        { "expr": "falcon_rebalancer_rows_migrated_total", "legendFormat": "rows migrated" },
+        { "expr": "falcon_rebalancer_runs_total", "legendFormat": "runs" }
+      ]
+    },
+    {
+      "title": "Rebalancer Move Rate & Tasks",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 60 },
+      "targets": [
+        { "expr": "falcon_rebalancer_move_rate_rows_per_sec", "legendFormat": "rows/s" },
+        { "expr": "falcon_rebalancer_completed_tasks", "legendFormat": "completed" },
+        { "expr": "falcon_rebalancer_failed_tasks", "legendFormat": "failed" }
+      ]
+    },
+    {
+      "title": "Memory & Storage",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 68 },
+      "collapsed": false
+    },
+    {
+      "title": "Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 51 },
+      "targets": [
+        { "expr": "falcon_memory_total_bytes", "legendFormat": "total" },
+        { "expr": "falcon_memory_mvcc_bytes", "legendFormat": "MVCC" },
+        { "expr": "falcon_memory_index_bytes", "legendFormat": "index" },
+        { "expr": "falcon_memory_write_buffer_bytes", "legendFormat": "write buffer" },
+        { "expr": "falcon_memory_soft_limit_bytes", "legendFormat": "soft limit" },
+        { "expr": "falcon_memory_hard_limit_bytes", "legendFormat": "hard limit" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "title": "WAL Fsync Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 51 },
+      "targets": [
+        { "expr": "falcon_wal_fsync_avg_us", "legendFormat": "avg" },
+        { "expr": "falcon_wal_fsync_max_us", "legendFormat": "max" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "µs" } }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["falcondb", "distributed", "cluster"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "FalconDB Cluster Dashboard",
+  "uid": "falcondb-cluster-v1",
+  "version": 1
+}

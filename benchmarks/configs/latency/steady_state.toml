@@ -1,0 +1,21 @@
+# FalconDB P2 — Steady-State Latency Benchmark
+# Verifies p99/p999 under normal (non-overloaded) conditions.
+
+[workload]
+duration_sec = 300
+concurrent_connections = 50
+target_tps = 500
+table_count = 10
+rows_per_table = 100000
+
+[workload.mix]
+select = 60
+insert = 20
+update = 15
+delete = 5
+
+[thresholds]
+max_p99_ms = 20
+max_p999_ms = 100
+min_accept_rate = 0.99
+max_gc_sweep_us = 5000
