@@ -1,0 +1,641 @@
+[1m[92m    Updating[0m crates.io index
+[1m[92m     Locking[0m 502 packages to latest compatible versions
+[1m[92m      Adding[0m bincode v1.3.3 [1m[33m(available: v3.0.0)[0m
+[1m[92m      Adding[0m criterion v0.5.1 [1m[33m(available: v0.8.2)[0m
+[1m[92m      Adding[0m generic-array v0.14.7 [1m[33m(available: v0.14.9)[0m
+[1m[92m      Adding[0m lz4_flex v0.11.5 [1m[33m(available: v0.12.0)[0m
+[1m[92m      Adding[0m metrics v0.22.4 [1m[33m(available: v0.24.3)[0m
+[1m[92m      Adding[0m metrics-exporter-prometheus v0.13.1 [1m[33m(available: v0.18.1)[0m
+[1m[92m      Adding[0m nix v0.29.0 [1m[33m(available: v0.31.2)[0m
+[1m[92m      Adding[0m object_store v0.11.2 [1m[33m(available: v0.13.1)[0m
+[1m[92m      Adding[0m prost v0.13.5 [1m[33m(available: v0.14.3)[0m
+[1m[92m      Adding[0m rand v0.8.5 [1m[33m(available: v0.10.0)[0m
+[1m[92m      Adding[0m rocksdb v0.22.0 [1m[33m(available: v0.24.0)[0m
+[1m[92m      Adding[0m rustyline v14.0.0 [1m[33m(available: v17.0.2)[0m
+[1m[92m      Adding[0m sqlparser v0.50.0 [1m[33m(available: v0.61.0)[0m
+[1m[92m      Adding[0m thiserror v1.0.69 [1m[33m(available: v2.0.18)[0m
+[1m[92m      Adding[0m toml v0.8.23 [1m[33m(available: v1.0.6+spec-1.1.0)[0m
+[1m[92m      Adding[0m tonic v0.12.3 [1m[33m(available: v0.14.5)[0m
+[1m[92m      Adding[0m tonic-build v0.12.3 [1m[33m(available: v0.14.5)[0m
+[1m[92m      Adding[0m windows-service v0.7.0 [1m[33m(available: v0.8.0)[0m
+[1m[92m      Adding[0m windows-sys v0.52.0 [1m[33m(available: v0.61.2)[0m
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m aead v0.5.2
+[1m[92m  Downloaded[0m autocfg v1.5.0
+[1m[92m  Downloaded[0m anstyle v1.0.14
+[1m[92m  Downloaded[0m async-trait v0.1.89
+[1m[92m  Downloaded[0m same-file v1.0.6
+[1m[92m  Downloaded[0m rusty-fork v0.3.1
+[1m[92m  Downloaded[0m bincode v1.3.3
+[1m[92m  Downloaded[0m anes v0.1.6
+[1m[92m  Downloaded[0m ciborium-ll v0.2.2
+[1m[92m  Downloaded[0m aes v0.8.4
+[1m[92m  Downloaded[0m scopeguard v1.2.0
+[1m[92m  Downloaded[0m serde_spanned v0.6.9
+[1m[92m  Downloaded[0m plotters-svg v0.3.7
+[1m[92m  Downloaded[0m quick-error v1.2.3
+[1m[92m  Downloaded[0m rand_xorshift v0.4.0
+[1m[92m  Downloaded[0m rand_chacha v0.9.0
+[1m[92m  Downloaded[0m subtle v2.6.1
+[1m[92m  Downloaded[0m rand_core v0.9.5
+[1m[92m  Downloaded[0m ppv-lite86 v0.2.21
+[1m[92m  Downloaded[0m version_check v0.9.5
+[1m[92m  Downloaded[0m wait-timeout v0.2.1
+[1m[92m  Downloaded[0m tokio-macros v2.6.1
+[1m[92m  Downloaded[0m zstd v0.13.3
+[1m[92m  Downloaded[0m zmij v1.0.21
+[1m[92m  Downloaded[0m xxhash-rust v0.8.15
+[1m[92m  Downloaded[0m tracing-attributes v0.1.31
+[1m[92m  Downloaded[0m zstd-safe v7.2.4
+[1m[92m  Downloaded[0m tracing-core v0.1.36
+[1m[92m  Downloaded[0m uuid v1.22.0
+[1m[92m  Downloaded[0m zerocopy-derive v0.8.42
+[1m[92m  Downloaded[0m serde_json v1.0.149
+[1m[92m  Downloaded[0m nix v0.29.0
+[1m[92m  Downloaded[0m toml_edit v0.22.27
+[1m[92m  Downloaded[0m chrono v0.4.44
+[1m[92m  Downloaded[0m unicode-ident v1.0.24
+[1m[92m  Downloaded[0m winnow v0.7.15
+[1m[92m  Downloaded[0m regex-syntax v0.8.10
+[1m[92m  Downloaded[0m typenum v1.19.0
+[1m[92m  Downloaded[0m socket2 v0.6.3
+[1m[92m  Downloaded[0m zerocopy v0.8.42
+[1m[92m  Downloaded[0m syn v2.0.117
+[1m[92m  Downloaded[0m proptest v1.10.0
+[1m[92m  Downloaded[0m serde v1.0.228
+[1m[92m  Downloaded[0m rayon v1.11.0
+[1m[92m  Downloaded[0m plotters v0.3.7
+[1m[92m  Downloaded[0m hashbrown v0.16.1
+[1m[92m  Downloaded[0m rustix v1.1.4
+[1m[92m  Downloaded[0m clap_builder v4.6.0
+[1m[92m  Downloaded[0m twox-hash v2.1.2
+[1m[92m  Downloaded[0m tracing v0.1.44
+[1m[92m  Downloaded[0m toml v0.8.23
+[1m[92m  Downloaded[0m regex-automata v0.4.14
+[1m[92m  Downloaded[0m tempfile v3.27.0
+[1m[92m  Downloaded[0m smallvec v1.15.1
+[1m[92m  Downloaded[0m signal-hook-registry v1.4.8
+[1m[92m  Downloaded[0m sha2 v0.10.9
+[1m[92m  Downloaded[0m serde_derive v1.0.228
+[1m[92m  Downloaded[0m regex v1.12.3
+[1m[92m  Downloaded[0m hashbrown v0.14.5
+[1m[92m  Downloaded[0m walkdir v2.5.0
+[1m[92m  Downloaded[0m tinytemplate v1.2.1
+[1m[92m  Downloaded[0m libc v0.2.183
+[1m[92m  Downloaded[0m thiserror v1.0.69
+[1m[92m  Downloaded[0m itertools v0.10.5
+[1m[92m  Downloaded[0m zstd-sys v2.0.16+zstd.1.5.7
+[1m[92m  Downloaded[0m indexmap v2.13.0
+[1m[92m  Downloaded[0m criterion v0.5.1
+[1m[92m  Downloaded[0m rand v0.9.2
+[1m[92m  Downloaded[0m rand v0.8.5
+[1m[92m  Downloaded[0m mio v1.1.1
+[1m[92m  Downloaded[0m memchr v2.8.0
+[1m[92m  Downloaded[0m tokio v1.50.0
+[1m[92m  Downloaded[0m thiserror-impl v1.0.69
+[1m[92m  Downloaded[0m shlex v1.3.0
+[1m[92m  Downloaded[0m serde_core v1.0.228
+[1m[92m  Downloaded[0m crossbeam-channel v0.5.15
+[1m[92m  Downloaded[0m cc v1.2.57
+[1m[92m  Downloaded[0m unarray v0.1.4
+[1m[92m  Downloaded[0m toml_datetime v0.6.11
+[1m[92m  Downloaded[0m rayon-core v1.13.0
+[1m[92m  Downloaded[0m proc-macro2 v1.0.106
+[1m[92m  Downloaded[0m half v2.7.1
+[1m[92m  Downloaded[0m getrandom v0.4.2
+[1m[92m  Downloaded[0m getrandom v0.3.4
+[1m[92m  Downloaded[0m bytes v1.11.1
+[1m[92m  Downloaded[0m universal-hash v0.5.1
+[1m[92m  Downloaded[0m toml_write v0.1.2
+[1m[92m  Downloaded[0m once_cell v1.21.4
+[1m[92m  Downloaded[0m num-traits v0.2.19
+[1m[92m  Downloaded[0m lock_api v0.4.14
+[1m[92m  Downloaded[0m iana-time-zone v0.1.65
+[1m[92m  Downloaded[0m hmac v0.12.1
+[1m[92m  Downloaded[0m ghash v0.5.1
+[1m[92m  Downloaded[0m crossbeam-utils v0.8.21
+[1m[92m  Downloaded[0m crossbeam-skiplist v0.1.3
+[1m[92m  Downloaded[0m crossbeam-deque v0.8.6
+[1m[92m  Downloaded[0m clap v4.6.0
+[1m[92m  Downloaded[0m ciborium v0.2.2
+[1m[92m  Downloaded[0m bit-vec v0.8.0
+[1m[92m  Downloaded[0m polyval v0.6.2
+[1m[92m  Downloaded[0m parking_lot_core v0.9.12
+[1m[92m  Downloaded[0m parking_lot v0.12.5
+[1m[92m  Downloaded[0m lz4_flex v0.11.5
+[1m[92m  Downloaded[0m find-msvc-tools v0.1.9
+[1m[92m  Downloaded[0m cipher v0.4.4
+[1m[92m  Downloaded[0m rand_core v0.6.4
+[1m[92m  Downloaded[0m quote v1.0.45
+[1m[92m  Downloaded[0m pkg-config v0.3.32
+[1m[92m  Downloaded[0m getrandom v0.2.17
+[1m[92m  Downloaded[0m digest v0.10.7
+[1m[92m  Downloaded[0m ctr v0.9.2
+[1m[92m  Downloaded[0m oorandom v11.1.5
+[1m[92m  Downloaded[0m jobserver v0.1.34
+[1m[92m  Downloaded[0m criterion-plot v0.5.0
+[1m[92m  Downloaded[0m bitflags v2.11.0
+[1m[92m  Downloaded[0m rand_chacha v0.3.1
+[1m[92m  Downloaded[0m pin-project-lite v0.2.17
+[1m[92m  Downloaded[0m generic-array v0.14.7
+[1m[92m  Downloaded[0m fnv v1.0.7
+[1m[92m  Downloaded[0m fastrand v2.3.0
+[1m[92m  Downloaded[0m crossbeam-queue v0.3.12
+[1m[92m  Downloaded[0m pbkdf2 v0.12.2
+[1m[92m  Downloaded[0m crypto-common v0.1.7
+[1m[92m  Downloaded[0m ciborium-io v0.2.2
+[1m[92m  Downloaded[0m cast v0.3.0
+[1m[92m  Downloaded[0m errno v0.3.14
+[1m[92m  Downloaded[0m cpufeatures v0.2.17
+[1m[92m  Downloaded[0m opaque-debug v0.3.1
+[1m[92m  Downloaded[0m is-terminal v0.4.17
+[1m[92m  Downloaded[0m inout v0.1.4
+[1m[92m  Downloaded[0m crossbeam-epoch v0.9.18
+[1m[92m  Downloaded[0m dashmap v6.1.0
+[1m[92m  Downloaded[0m cfg-if v1.0.4
+[1m[92m  Downloaded[0m block-buffer v0.10.4
+[1m[92m  Downloaded[0m aho-corasick v1.1.4
+[1m[92m  Downloaded[0m aes-gcm v0.10.3
+[1m[92m  Downloaded[0m plotters-backend v0.3.7
+[1m[92m  Downloaded[0m itoa v1.0.17
+[1m[92m  Downloaded[0m equivalent v1.0.2
+[1m[92m  Downloaded[0m either v1.15.0
+[1m[92m  Downloaded[0m crossbeam v0.8.4
+[1m[92m  Downloaded[0m crc32fast v1.5.0
+[1m[92m  Downloaded[0m clap_lex v1.1.0
+[1m[92m  Downloaded[0m cfg_aliases v0.2.1
+[1m[92m  Downloaded[0m bit-set v0.8.0
+[1m[92m  Downloaded[0m linux-raw-sys v0.12.1
+[1m[92m   Compiling[0m libc v0.2.183
+[1m[92m   Compiling[0m cfg-if v1.0.4
+[1m[92m   Compiling[0m proc-macro2 v1.0.106
+[1m[92m   Compiling[0m unicode-ident v1.0.24
+[1m[92m   Compiling[0m quote v1.0.45
+[1m[92m   Compiling[0m serde_core v1.0.228
+[1m[92m   Compiling[0m version_check v0.9.5
+[1m[92m   Compiling[0m typenum v1.19.0
+[1m[92m   Compiling[0m syn v2.0.117
+[1m[92m   Compiling[0m generic-array v0.14.7
+[1m[92m   Compiling[0m serde v1.0.228
+[1m[92m   Compiling[0m getrandom v0.2.17
+[1m[92m   Compiling[0m rand_core v0.6.4
+[1m[92m   Compiling[0m crossbeam-utils v0.8.21
+[1m[92m   Compiling[0m zerocopy v0.8.42
+[1m[92m   Compiling[0m crypto-common v0.1.7
+[1m[92m   Compiling[0m once_cell v1.21.4
+[1m[92m   Compiling[0m shlex v1.3.0
+[1m[92m   Compiling[0m subtle v2.6.1
+[1m[92m   Compiling[0m autocfg v1.5.0
+[1m[92m   Compiling[0m find-msvc-tools v0.1.9
+[1m[92m   Compiling[0m getrandom v0.4.2
+[1m[92m   Compiling[0m pkg-config v0.3.32
+[1m[92m   Compiling[0m jobserver v0.1.34
+[1m[92m   Compiling[0m num-traits v0.2.19
+[1m[92m   Compiling[0m cc v1.2.57
+[1m[92m   Compiling[0m crossbeam-epoch v0.9.18
+[1m[92m   Compiling[0m zmij v1.0.21
+[1m[92m   Compiling[0m getrandom v0.3.4
+[1m[92m   Compiling[0m bitflags v2.11.0
+[1m[92m   Compiling[0m serde_json v1.0.149
+[1m[92m   Compiling[0m cpufeatures v0.2.17
+[1m[92m   Compiling[0m parking_lot_core v0.9.12
+[1m[92m   Compiling[0m crossbeam-deque v0.8.6
+[1m[92m   Compiling[0m block-buffer v0.10.4
+[1m[92m   Compiling[0m inout v0.1.4
+[1m[92m   Compiling[0m itoa v1.0.17
+[1m[92m   Compiling[0m hashbrown v0.16.1
+[1m[92m   Compiling[0m scopeguard v1.2.0
+[1m[92m   Compiling[0m memchr v2.8.0
+[1m[92m   Compiling[0m zstd-safe v7.2.4
+[1m[92m   Compiling[0m rustix v1.1.4
+[1m[92m   Compiling[0m equivalent v1.0.2
+[1m[92m   Compiling[0m indexmap v2.13.0
+[1m[92m   Compiling[0m lock_api v0.4.14
+[1m[92m   Compiling[0m cipher v0.4.4
+[1m[92m   Compiling[0m digest v0.10.7
+[1m[92m   Compiling[0m rand_core v0.9.5
+[1m[92m   Compiling[0m universal-hash v0.5.1
+[1m[92m   Compiling[0m rayon-core v1.13.0
+[1m[92m   Compiling[0m pin-project-lite v0.2.17
+[1m[92m   Compiling[0m thiserror v1.0.69
+[1m[92m   Compiling[0m cfg_aliases v0.2.1
+[1m[92m   Compiling[0m regex-syntax v0.8.10
+[1m[92m   Compiling[0m winnow v0.7.15
+[1m[92m   Compiling[0m zstd-sys v2.0.16+zstd.1.5.7
+[1m[92m   Compiling[0m linux-raw-sys v0.12.1
+[1m[92m   Compiling[0m opaque-debug v0.3.1
+[1m[92m   Compiling[0m toml_write v0.1.2
+[1m[92m   Compiling[0m either v1.15.0
+[1m[92m   Compiling[0m polyval v0.6.2
+[1m[92m   Compiling[0m nix v0.29.0
+[1m[92m   Compiling[0m tracing-core v0.1.36
+[1m[92m   Compiling[0m errno v0.3.14
+[1m[92m   Compiling[0m iana-time-zone v0.1.65
+[1m[92m   Compiling[0m ciborium-io v0.2.2
+[1m[92m   Compiling[0m bytes v1.11.1
+[1m[92m   Compiling[0m anstyle v1.0.14
+[1m[92m   Compiling[0m fastrand v2.3.0
+[1m[92m   Compiling[0m twox-hash v2.1.2
+[1m[92m   Compiling[0m clap_lex v1.1.0
+[1m[92m   Compiling[0m crc32fast v1.5.0
+[1m[92m   Compiling[0m plotters-backend v0.3.7
+[1m[92m   Compiling[0m clap_builder v4.6.0
+[1m[92m   Compiling[0m plotters-svg v0.3.7
+[1m[92m   Compiling[0m lz4_flex v0.11.5
+[1m[92m   Compiling[0m tempfile v3.27.0
+[1m[92m   Compiling[0m signal-hook-registry v1.4.8
+[1m[92m   Compiling[0m ghash v0.5.1
+[1m[92m   Compiling[0m itertools v0.10.5
+[1m[92m   Compiling[0m regex-automata v0.4.14
+[1m[92m   Compiling[0m serde_derive v1.0.228
+[1m[92m   Compiling[0m zerocopy-derive v0.8.42
+[1m[92m   Compiling[0m thiserror-impl v1.0.69
+[1m[92m   Compiling[0m tracing-attributes v0.1.31
+[1m[92m   Compiling[0m ppv-lite86 v0.2.21
+[1m[92m   Compiling[0m half v2.7.1
+[1m[92m   Compiling[0m smallvec v1.15.1
+[1m[92m   Compiling[0m toml_datetime v0.6.11
+[1m[92m   Compiling[0m serde_spanned v0.6.9
+[1m[92m   Compiling[0m toml_edit v0.22.27
+[1m[92m   Compiling[0m parking_lot v0.12.5
+[1m[92m   Compiling[0m ciborium-ll v0.2.2
+[1m[92m   Compiling[0m chrono v0.4.44
+[1m[92m   Compiling[0m toml v0.8.23
+[1m[92m   Compiling[0m rand_chacha v0.3.1
+[1m[92m   Compiling[0m tokio-macros v2.6.1
+[1m[92m   Compiling[0m hmac v0.12.1
+[1m[92m   Compiling[0m aes v0.8.4
+[1m[92m   Compiling[0m ctr v0.9.2
+[1m[92m   Compiling[0m uuid v1.22.0
+[1m[92m   Compiling[0m crossbeam-channel v0.5.15
+[1m[92m   Compiling[0m crossbeam-queue v0.3.12
+[1m[92m   Compiling[0m tracing v0.1.44
+[1m[92m   Compiling[0m aead v0.5.2
+[1m[92m   Compiling[0m wait-timeout v0.2.1
+[1m[92m   Compiling[0m socket2 v0.6.3
+[1m[92m   Compiling[0m mio v1.1.1
+[1m[92m   Compiling[0m hashbrown v0.14.5
+[1m[92m   Compiling[0m xxhash-rust v0.8.15
+[1m[92m   Compiling[0m fnv v1.0.7
+[1m[92m   Compiling[0m cast v0.3.0
+[1m[92m   Compiling[0m bit-vec v0.8.0
+[1m[92m   Compiling[0m quick-error v1.2.3
+[1m[92m   Compiling[0m same-file v1.0.6
+[1m[92m   Compiling[0m walkdir v2.5.0
+[1m[92m   Compiling[0m bit-set v0.8.0
+[1m[92m   Compiling[0m rusty-fork v0.3.1
+[1m[92m   Compiling[0m criterion-plot v0.5.0
+[1m[92m   Compiling[0m dashmap v6.1.0
+[1m[92m   Compiling[0m falcon_common v1.2.0 (/home/runner/work/falcondb/falcondb/crates/falcon_common)
+[1m[92m   Compiling[0m aes-gcm v0.10.3
+[1m[92m   Compiling[0m crossbeam v0.8.4
+[1m[92m   Compiling[0m pbkdf2 v0.12.2
+[1m[92m   Compiling[0m rand v0.8.5
+[1m[33mwarning[0m[1m: unused import: `std::cmp::Ordering`[0m
+   [1m[94m--> [0mcrates/falcon_common/src/schema.rs:347:9
+    [1m[94m|[0m
+[1m[94m347[0m [1m[94m|[0m     use std::cmp::Ordering;
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+[1m[92m   Compiling[0m tokio v1.50.0
+[1m[92m   Compiling[0m ciborium v0.2.2
+[1m[33mwarning[0m[1m: unused import: `std::hash::Hasher`[0m
+   [1m[94m--> [0mcrates/falcon_common/src/schema.rs:370:9
+    [1m[94m|[0m
+[1m[94m370[0m [1m[94m|[0m     use std::hash::Hasher as _;
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^[0m
+
+[1m[92m   Compiling[0m bincode v1.3.3
+[1m[92m   Compiling[0m tinytemplate v1.2.1
+[1m[92m   Compiling[0m rand_chacha v0.9.0
+[1m[92m   Compiling[0m regex v1.12.3
+[1m[92m   Compiling[0m async-trait v0.1.89
+[1m[92m   Compiling[0m zstd v0.13.3
+[1m[92m   Compiling[0m falcon_segment_codec v1.2.0 (/home/runner/work/falcondb/falcondb/crates/falcon_segment_codec)
+[1m[33mwarning[0m: `falcon_common` (lib) generated 2 warnings (run `cargo fix --lib -p falcon_common` to apply 1 suggestion)
+[1m[92m   Compiling[0m rayon v1.11.0
+[1m[92m   Compiling[0m clap v4.6.0
+[1m[92m   Compiling[0m plotters v0.3.7
+[1m[92m   Compiling[0m rand v0.9.2
+[1m[92m   Compiling[0m rand_xorshift v0.4.0
+[1m[92m   Compiling[0m sha2 v0.10.9
+[1m[92m   Compiling[0m crossbeam-skiplist v0.1.3
+[1m[92m   Compiling[0m is-terminal v0.4.17
+[1m[92m   Compiling[0m oorandom v11.1.5
+[1m[92m   Compiling[0m anes v0.1.6
+[1m[92m   Compiling[0m unarray v0.1.4
+[1m[92m   Compiling[0m proptest v1.10.0
+[1m[92m   Compiling[0m criterion v0.5.1
+[1m[92m   Compiling[0m falcon_storage v1.2.0 (/home/runner/work/falcondb/falcondb/crates/falcon_storage)
+[1m[33mwarning[0m[1m: unused import: `TableId`[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/memtable.rs:164:28
+    [1m[94m|[0m
+[1m[94m164[0m [1m[94m|[0m use falcon_common::types::{TableId, Timestamp, TxnId};
+    [1m[94m|[0m                            [1m[33m^^^^^^^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnLocal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:2886:61
+     [1m[94m|[0m
+[1m[94m2886[0m [1m[94m|[0m                         let _ = self.append_wal(&WalRecord::AbortTxnLocal { txn_id });
+     [1m[94m|[0m                                                             [1m[33m^^^^^^^^^^^^^[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(deprecated)]` on by default
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnLocal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:2905:33
+     [1m[94m|[0m
+[1m[94m2905[0m [1m[94m|[0m                     &WalRecord::CommitTxnLocal { txn_id, commit_ts },
+     [1m[94m|[0m                                 [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnLocal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:2934:67
+     [1m[94m|[0m
+[1m[94m2934[0m [1m[94m|[0m                     let _ = self.append_and_flush_wal(&WalRecord::AbortTxnLocal { txn_id });
+     [1m[94m|[0m                                                                   [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnLocal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:2982:63
+     [1m[94m|[0m
+[1m[94m2982[0m [1m[94m|[0m             if let Err(wal_err) = self.append_wal(&WalRecord::AbortTxnLocal { txn_id }) {
+     [1m[94m|[0m                                                               [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnLocal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:3006:25
+     [1m[94m|[0m
+[1m[94m3006[0m [1m[94m|[0m             &WalRecord::CommitTxnLocal { txn_id, commit_ts },
+     [1m[94m|[0m                         [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnLocal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:3014:73
+     [1m[94m|[0m
+[1m[94m3014[0m [1m[94m|[0m             if let Err(wal_err) = self.append_and_flush_wal(&WalRecord::AbortTxnLocal { txn_id }) {
+     [1m[94m|[0m                                                                         [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnGlobal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:3076:25
+     [1m[94m|[0m
+[1m[94m3076[0m [1m[94m|[0m             &WalRecord::CommitTxnGlobal { txn_id, commit_ts },
+     [1m[94m|[0m                         [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnLocal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:3114:37
+     [1m[94m|[0m
+[1m[94m3114[0m [1m[94m|[0m         self.append_wal(&WalRecord::AbortTxnLocal { txn_id })?;
+     [1m[94m|[0m                                     [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnGlobal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:3135:37
+     [1m[94m|[0m
+[1m[94m3135[0m [1m[94m|[0m         self.append_wal(&WalRecord::AbortTxnGlobal { txn_id })?;
+     [1m[94m|[0m                                     [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::BeginTxn`: MVCC does not need a WAL begin marker; do not write in new code[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:3809:28
+     [1m[94m|[0m
+[1m[94m3809[0m [1m[94m|[0m                 WalRecord::BeginTxn { .. }
+     [1m[94m|[0m                            [1m[33m^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnLocal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4047:30
+     [1m[94m|[0m
+[1m[94m4047[0m [1m[94m|[0m                 | WalRecord::CommitTxnLocal { txn_id, commit_ts }
+     [1m[94m|[0m                              [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnGlobal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4048:30
+     [1m[94m|[0m
+[1m[94m4048[0m [1m[94m|[0m                 | WalRecord::CommitTxnGlobal { txn_id, commit_ts } => {
+     [1m[94m|[0m                              [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnLocal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4071:30
+     [1m[94m|[0m
+[1m[94m4071[0m [1m[94m|[0m                 | WalRecord::AbortTxnLocal { txn_id }
+     [1m[94m|[0m                              [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnGlobal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4072:30
+     [1m[94m|[0m
+[1m[94m4072[0m [1m[94m|[0m                 | WalRecord::AbortTxnGlobal { txn_id } => {
+     [1m[94m|[0m                              [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnLocal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4556:26
+     [1m[94m|[0m
+[1m[94m4556[0m [1m[94m|[0m             | WalRecord::CommitTxnLocal { commit_ts, txn_id }
+     [1m[94m|[0m                          [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnGlobal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4557:26
+     [1m[94m|[0m
+[1m[94m4557[0m [1m[94m|[0m             | WalRecord::CommitTxnGlobal { commit_ts, txn_id } = record
+     [1m[94m|[0m                          [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::BeginTxn`: MVCC does not need a WAL begin marker; do not write in new code[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4582:28
+     [1m[94m|[0m
+[1m[94m4582[0m [1m[94m|[0m                 WalRecord::BeginTxn { .. }
+     [1m[94m|[0m                            [1m[33m^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnLocal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4700:30
+     [1m[94m|[0m
+[1m[94m4700[0m [1m[94m|[0m                 | WalRecord::CommitTxnLocal { txn_id, commit_ts }
+     [1m[94m|[0m                              [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnGlobal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4701:30
+     [1m[94m|[0m
+[1m[94m4701[0m [1m[94m|[0m                 | WalRecord::CommitTxnGlobal { txn_id, commit_ts } => {
+     [1m[94m|[0m                              [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnLocal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4713:30
+     [1m[94m|[0m
+[1m[94m4713[0m [1m[94m|[0m                 | WalRecord::AbortTxnLocal { txn_id }
+     [1m[94m|[0m                              [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnGlobal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4714:30
+     [1m[94m|[0m
+[1m[94m4714[0m [1m[94m|[0m                 | WalRecord::AbortTxnGlobal { txn_id } => {
+     [1m[94m|[0m                              [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::BeginTxn`: MVCC does not need a WAL begin marker; do not write in new code[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/cdc_wal_bridge.rs:330:24
+    [1m[94m|[0m
+[1m[94m330[0m [1m[94m|[0m             WalRecord::BeginTxn { txn_id } => {
+    [1m[94m|[0m                        [1m[33m^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnLocal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/cdc_wal_bridge.rs:427:26
+    [1m[94m|[0m
+[1m[94m427[0m [1m[94m|[0m             | WalRecord::CommitTxnLocal { txn_id, .. }
+    [1m[94m|[0m                          [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::CommitTxnGlobal`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/cdc_wal_bridge.rs:428:26
+    [1m[94m|[0m
+[1m[94m428[0m [1m[94m|[0m             | WalRecord::CommitTxnGlobal { txn_id, .. } => {
+    [1m[94m|[0m                          [1m[33m^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnLocal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/cdc_wal_bridge.rs:433:26
+    [1m[94m|[0m
+[1m[94m433[0m [1m[94m|[0m             | WalRecord::AbortTxnLocal { txn_id }
+    [1m[94m|[0m                          [1m[33m^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated variant `wal::WalRecord::AbortTxnGlobal`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/cdc_wal_bridge.rs:434:26
+    [1m[94m|[0m
+[1m[94m434[0m [1m[94m|[0m             | WalRecord::AbortTxnGlobal { txn_id } => {
+    [1m[94m|[0m                          [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnLocal::txn_id`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4047:47
+     [1m[94m|[0m
+[1m[94m4047[0m [1m[94m|[0m                 | WalRecord::CommitTxnLocal { txn_id, commit_ts }
+     [1m[94m|[0m                                               [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnLocal::commit_ts`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4047:55
+     [1m[94m|[0m
+[1m[94m4047[0m [1m[94m|[0m                 | WalRecord::CommitTxnLocal { txn_id, commit_ts }
+     [1m[94m|[0m                                                       [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnGlobal::txn_id`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4048:48
+     [1m[94m|[0m
+[1m[94m4048[0m [1m[94m|[0m                 | WalRecord::CommitTxnGlobal { txn_id, commit_ts } => {
+     [1m[94m|[0m                                                [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnGlobal::commit_ts`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4048:56
+     [1m[94m|[0m
+[1m[94m4048[0m [1m[94m|[0m                 | WalRecord::CommitTxnGlobal { txn_id, commit_ts } => {
+     [1m[94m|[0m                                                        [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::AbortTxnLocal::txn_id`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4071:46
+     [1m[94m|[0m
+[1m[94m4071[0m [1m[94m|[0m                 | WalRecord::AbortTxnLocal { txn_id }
+     [1m[94m|[0m                                              [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::AbortTxnGlobal::txn_id`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4072:47
+     [1m[94m|[0m
+[1m[94m4072[0m [1m[94m|[0m                 | WalRecord::AbortTxnGlobal { txn_id } => {
+     [1m[94m|[0m                                               [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnLocal::commit_ts`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4556:43
+     [1m[94m|[0m
+[1m[94m4556[0m [1m[94m|[0m             | WalRecord::CommitTxnLocal { commit_ts, txn_id }
+     [1m[94m|[0m                                           [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnLocal::txn_id`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4556:54
+     [1m[94m|[0m
+[1m[94m4556[0m [1m[94m|[0m             | WalRecord::CommitTxnLocal { commit_ts, txn_id }
+     [1m[94m|[0m                                                      [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnGlobal::commit_ts`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4557:44
+     [1m[94m|[0m
+[1m[94m4557[0m [1m[94m|[0m             | WalRecord::CommitTxnGlobal { commit_ts, txn_id } = record
+     [1m[94m|[0m                                            [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnGlobal::txn_id`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4557:55
+     [1m[94m|[0m
+[1m[94m4557[0m [1m[94m|[0m             | WalRecord::CommitTxnGlobal { commit_ts, txn_id } = record
+     [1m[94m|[0m                                                       [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnLocal::txn_id`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4700:47
+     [1m[94m|[0m
+[1m[94m4700[0m [1m[94m|[0m                 | WalRecord::CommitTxnLocal { txn_id, commit_ts }
+     [1m[94m|[0m                                               [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnLocal::commit_ts`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4700:55
+     [1m[94m|[0m
+[1m[94m4700[0m [1m[94m|[0m                 | WalRecord::CommitTxnLocal { txn_id, commit_ts }
+     [1m[94m|[0m                                                       [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnGlobal::txn_id`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4701:48
+     [1m[94m|[0m
+[1m[94m4701[0m [1m[94m|[0m                 | WalRecord::CommitTxnGlobal { txn_id, commit_ts } => {
+     [1m[94m|[0m                                                [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnGlobal::commit_ts`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4701:56
+     [1m[94m|[0m
+[1m[94m4701[0m [1m[94m|[0m                 | WalRecord::CommitTxnGlobal { txn_id, commit_ts } => {
+     [1m[94m|[0m                                                        [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::AbortTxnLocal::txn_id`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4713:46
+     [1m[94m|[0m
+[1m[94m4713[0m [1m[94m|[0m                 | WalRecord::AbortTxnLocal { txn_id }
+     [1m[94m|[0m                                              [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::AbortTxnGlobal::txn_id`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/engine.rs:4714:47
+     [1m[94m|[0m
+[1m[94m4714[0m [1m[94m|[0m                 | WalRecord::AbortTxnGlobal { txn_id } => {
+     [1m[94m|[0m                                               [1m[33m^^^^^^[0m
+
+[1m[91merror[E0308][0m[1m: mismatched types[0m
+    [1m[94m--> [0mcrates/falcon_storage/src/wal.rs:996:17
+     [1m[94m|[0m
+[1m[94m 995[0m [1m[94m|[0m             if let Err(e) = nix::fcntl::fallocate(
+     [1m[94m|[0m                             [1m[94m---------------------[0m [1m[94marguments to this function are incorrect[0m
+[1m[94m 996[0m [1m[94m|[0m                 file.as_fd(),
+     [1m[94m|[0m                 [1m[91m^^^^^^^^^^^^[0m [1m[91mexpected `i32`, found `BorrowedFd<'_>`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: function defined here
+    [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.29.0/src/fcntl.rs:1190:8
+     [1m[94m|[0m
+[1m[94m1190[0m [1m[94m|[0m pub fn fallocate(
+     [1m[94m|[0m        [1m[92m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::BeginTxn::txn_id`: MVCC does not need a WAL begin marker; do not write in new code[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/cdc_wal_bridge.rs:330:35
+    [1m[94m|[0m
+[1m[94m330[0m [1m[94m|[0m             WalRecord::BeginTxn { txn_id } => {
+    [1m[94m|[0m                                   [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnLocal::txn_id`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/cdc_wal_bridge.rs:427:43
+    [1m[94m|[0m
+[1m[94m427[0m [1m[94m|[0m             | WalRecord::CommitTxnLocal { txn_id, .. }
+    [1m[94m|[0m                                           [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::CommitTxnGlobal::txn_id`: use CommitTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/cdc_wal_bridge.rs:428:44
+    [1m[94m|[0m
+[1m[94m428[0m [1m[94m|[0m             | WalRecord::CommitTxnGlobal { txn_id, .. } => {
+    [1m[94m|[0m                                            [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::AbortTxnLocal::txn_id`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/cdc_wal_bridge.rs:433:42
+    [1m[94m|[0m
+[1m[94m433[0m [1m[94m|[0m             | WalRecord::AbortTxnLocal { txn_id }
+    [1m[94m|[0m                                          [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated field `wal::WalRecord::AbortTxnGlobal::txn_id`: use AbortTxn instead; Local/Global distinction is not needed at the WAL layer[0m
+   [1m[94m--> [0mcrates/falcon_storage/src/cdc_wal_bridge.rs:434:43
+    [1m[94m|[0m
+[1m[94m434[0m [1m[94m|[0m             | WalRecord::AbortTxnGlobal { txn_id } => {
+    [1m[94m|[0m                                           [1m[33m^^^^^^[0m
+
+[1mFor more information about this error, try `rustc --explain E0308`.[0m
+[1m[33mwarning[0m: `falcon_storage` (lib) generated 48 warnings
+[1m[91merror[0m: could not compile `falcon_storage` (lib) due to 1 previous error; 48 warnings emitted
+[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
