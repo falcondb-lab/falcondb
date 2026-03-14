@@ -356,6 +356,15 @@ impl Executor {
                     }
                 }
 
+                // O4: Track hash table memory in QueryGovernor
+                {
+                    let ht_bytes = hash_table.iter()
+                        .map(|(k, v)| k.len() + v.len() * 8 + 64)
+                        .sum::<usize>() as u64;
+                    self.query_governor.record_memory(ht_bytes)?;
+                    self.query_governor.check_timeout()?;
+                }
+
                 // Probe buffer: reused across all left rows — zero alloc per probe.
                 let mut probe_buf = Vec::with_capacity(key_pairs.len() * 9);
 
@@ -378,30 +387,78 @@ impl Executor {
 
                 match join.join_type {
                     JoinType::Inner => {
-                        for left_row in &combined_rows {
-                            probe_buf.clear();
-                            if !Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf)
-                            {
-                                continue;
+                        // O5: If left (combined) is smaller, rebuild hash on left
+                        // and probe with right to reduce hash table memory.
+                        if combined_rows.len() < right_data.len() {
+                            // Rebuild hash table on the smaller left side
+                            let mut left_ht: HashMap<Vec<u8>, Vec<usize>> =
+                                HashMap::with_capacity(combined_rows.len());
+                            let mut lk_buf = Vec::with_capacity(key_pairs.len() * 9);
+                            for (li, left_row) in combined_rows.iter().enumerate() {
+                                lk_buf.clear();
+                                if !Self::encode_join_key_into(left_row, &left_key_cols, &mut lk_buf) {
+                                    continue;
+                                }
+                                if let Some(bucket) = left_ht.get_mut(lk_buf.as_slice()) {
+                                    bucket.push(li);
+                                } else {
+                                    left_ht.insert(lk_buf.clone(), vec![li]);
+                                }
                             }
-                            if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
-                                for &ri in indices {
-                                    let merged = self.merge_rows_into(
-                                        left_row,
-                                        &right_data[ri],
-                                        &mut merge_buf,
-                                    );
-                                    if !pure_equi {
-                                        if let Some(ref cond) = join.condition {
-                                            if !ExprEngine::eval_filter(cond, &merged)
-                                                .map_err(FalconError::Execution)?
-                                            {
-                                                merge_buf = merged.values;
-                                                continue;
+                            // Probe with right side, merge in (left, right) order
+                            for right_row in &right_data {
+                                probe_buf.clear();
+                                if !Self::encode_join_key_into(right_row, &right_key_cols, &mut probe_buf) {
+                                    continue;
+                                }
+                                if let Some(indices) = left_ht.get(probe_buf.as_slice()) {
+                                    for &li in indices {
+                                        let merged = self.merge_rows_into(
+                                            &combined_rows[li],
+                                            right_row,
+                                            &mut merge_buf,
+                                        );
+                                        if !pure_equi {
+                                            if let Some(ref cond) = join.condition {
+                                                if !ExprEngine::eval_filter(cond, &merged)
+                                                    .map_err(FalconError::Execution)?
+                                                {
+                                                    merge_buf = merged.values;
+                                                    continue;
+                                                }
                                             }
                                         }
+                                        new_combined.push(merged);
                                     }
-                                    new_combined.push(merged);
+                                }
+                            }
+                        } else {
+                            // Original path: build hash on right, probe with left
+                            for left_row in &combined_rows {
+                                probe_buf.clear();
+                                if !Self::encode_join_key_into(left_row, &left_key_cols, &mut probe_buf)
+                                {
+                                    continue;
+                                }
+                                if let Some(indices) = hash_table.get(probe_buf.as_slice()) {
+                                    for &ri in indices {
+                                        let merged = self.merge_rows_into(
+                                            left_row,
+                                            &right_data[ri],
+                                            &mut merge_buf,
+                                        );
+                                        if !pure_equi {
+                                            if let Some(ref cond) = join.condition {
+                                                if !ExprEngine::eval_filter(cond, &merged)
+                                                    .map_err(FalconError::Execution)?
+                                                {
+                                                    merge_buf = merged.values;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        new_combined.push(merged);
+                                    }
                                 }
                             }
                         }
@@ -550,6 +607,16 @@ impl Executor {
             }
 
             combined_rows = new_combined;
+
+            // O4: Track join result memory in QueryGovernor
+            {
+                let join_bytes = combined_rows
+                    .iter()
+                    .map(|r| r.values.len() * 16 + 64)
+                    .sum::<usize>() as u64;
+                self.query_governor.record_memory(join_bytes)?;
+                self.query_governor.check_timeout()?;
+            }
         }
 
         self.finish_join_pipeline(

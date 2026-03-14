@@ -517,33 +517,57 @@ impl Executor {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
-                // Scan referenced table ONCE, build HashSet of valid FK values
-                let ref_rows = self.storage.scan(ref_table_id, txn.txn_id, read_ts)?;
-                let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows
-                    .iter()
-                    .map(|(_, ref_row)| {
-                        ref_col_indices
-                            .iter()
-                            .map(|&idx| ref_row.values[idx].clone())
-                            .collect()
-                    })
-                    .collect();
+                // O2: When referenced columns match the parent PK, use per-row
+                // PK point lookup O(B * logN) instead of full scan O(N) + HashSet.
+                let ref_is_pk = ref_col_indices == ref_schema.primary_key_columns;
 
-                // Check each new row
-                for new_row in &built_rows {
-                    let fk_vals: Vec<Datum> = fk
-                        .columns
-                        .iter()
-                        .map(|&idx| new_row.values[idx].clone())
-                        .collect();
-                    if fk_vals.iter().any(falcon_common::datum::Datum::is_null) {
-                        continue;
+                if ref_is_pk {
+                    // Fast path: PK point lookup per inserted row
+                    for new_row in &built_rows {
+                        let fk_vals: Vec<Datum> = fk
+                            .columns
+                            .iter()
+                            .map(|&idx| new_row.values[idx].clone())
+                            .collect();
+                        if fk_vals.iter().any(falcon_common::datum::Datum::is_null) {
+                            continue;
+                        }
+                        let pk_refs: Vec<&Datum> = fk_vals.iter().collect();
+                        let pk_buf = falcon_storage::memtable::encode_pk_from_datums_stack(&pk_refs);
+                        if self.storage.get(ref_table_id, &pk_buf, txn.txn_id, read_ts)?.is_none() {
+                            return Err(FalconError::Execution(ExecutionError::TypeError(format!(
+                                "FOREIGN KEY constraint violated: no matching row in '{}'",
+                                fk.ref_table
+                            ))));
+                        }
                     }
-                    if !fk_set.contains(&fk_vals) {
-                        return Err(FalconError::Execution(ExecutionError::TypeError(format!(
-                            "FOREIGN KEY constraint violated: no matching row in '{}'",
-                            fk.ref_table
-                        ))));
+                } else {
+                    // Fallback: scan referenced table, build HashSet
+                    let ref_rows = self.storage.scan(ref_table_id, txn.txn_id, read_ts)?;
+                    let fk_set: std::collections::HashSet<Vec<Datum>> = ref_rows
+                        .iter()
+                        .map(|(_, ref_row)| {
+                            ref_col_indices
+                                .iter()
+                                .map(|&idx| ref_row.values[idx].clone())
+                                .collect()
+                        })
+                        .collect();
+                    for new_row in &built_rows {
+                        let fk_vals: Vec<Datum> = fk
+                            .columns
+                            .iter()
+                            .map(|&idx| new_row.values[idx].clone())
+                            .collect();
+                        if fk_vals.iter().any(falcon_common::datum::Datum::is_null) {
+                            continue;
+                        }
+                        if !fk_set.contains(&fk_vals) {
+                            return Err(FalconError::Execution(ExecutionError::TypeError(format!(
+                                "FOREIGN KEY constraint violated: no matching row in '{}'",
+                                fk.ref_table
+                            ))));
+                        }
                     }
                 }
             }
@@ -642,6 +666,14 @@ impl Executor {
                 vec![]
             };
 
+        // O8: Hoist trigger check outside the per-row loop — one get_catalog() per statement
+        let has_insert_row_triggers = {
+            use falcon_common::schema::{TriggerEvent, TriggerLevel};
+            let cat = self.storage.get_catalog();
+            cat.triggers_for_table(&schema.name).iter()
+                .any(|t| t.enabled && t.events.contains(&TriggerEvent::Insert) && t.level == TriggerLevel::Row)
+        };
+
         for row_exprs in rows {
             let values = self.build_insert_row(schema, columns, row_exprs)?;
 
@@ -665,12 +697,10 @@ impl Executor {
                 }
             }
 
-            let new_vars = {
-                use falcon_common::schema::{TriggerEvent, TriggerLevel};
-                let cat = self.storage.get_catalog();
-                let needs = cat.triggers_for_table(&schema.name).iter()
-                    .any(|t| t.enabled && t.events.contains(&TriggerEvent::Insert) && t.level == TriggerLevel::Row);
-                if needs { Some(Self::build_new_row_vars(schema, &OwnedRow::new(values.clone()))) } else { None }
+            let new_vars = if has_insert_row_triggers {
+                Some(Self::build_new_row_vars(schema, &OwnedRow::new(values.clone())))
+            } else {
+                None
             };
             if let Some(ref rv) = new_vars {
                 use falcon_common::schema::{TriggerEvent, TriggerTiming};
@@ -701,42 +731,77 @@ impl Executor {
                             // Skip this row silently
                         }
                         Some(OnConflictAction::DoUpdate(assignments, where_clause)) => {
-                            // Find the existing row by PK and update it
-                            let pk_values: Vec<Datum> = schema
+                            // O1: PK point lookup instead of full table scan.
+                            // Encode PK from the conflicting row's values.
+                            let pk_datum_refs: Vec<&Datum> = schema
                                 .primary_key_columns
                                 .iter()
-                                .map(|&idx| values[idx].clone())
+                                .map(|&idx| &values[idx])
                                 .collect();
+                            let pk_buf = falcon_storage::memtable::encode_pk_from_datums_stack(&pk_datum_refs);
                             let read_ts = txn.read_ts(self.txn_mgr.current_ts());
-                            let existing_rows = self.storage.scan(table_id, txn.txn_id, read_ts)?;
-                            for (pk, existing_row) in &existing_rows {
-                                let existing_pk: Vec<Datum> = schema
-                                    .primary_key_columns
-                                    .iter()
-                                    .map(|&idx| existing_row.values[idx].clone())
-                                    .collect();
-                                if existing_pk == pk_values {
-                                    // Build combined row: [existing cols] ++ [excluded cols]
-                                    let mut combined_values = existing_row.values.clone();
-                                    combined_values.extend(values.iter().cloned());
-                                    let combined_row = OwnedRow::new(combined_values);
+                            let pk = pk_buf.to_vec();
+                            if let Some(existing_row) = self.storage.get(table_id, &pk, txn.txn_id, read_ts)? {
+                                // Build combined row: [existing cols] ++ [excluded cols]
+                                let mut combined_values = existing_row.values.clone();
+                                combined_values.extend(values.iter().cloned());
+                                let combined_row = OwnedRow::new(combined_values);
 
-                                    // Evaluate WHERE clause — skip update if false
-                                    if let Some(ref wc) = where_clause {
-                                        if !ExprEngine::eval_filter(wc, &combined_row)
-                                            .map_err(FalconError::Execution)?
-                                        {
-                                            break;
+                                // Evaluate WHERE clause — skip update if false
+                                if let Some(ref wc) = where_clause {
+                                    if !ExprEngine::eval_filter(wc, &combined_row)
+                                        .map_err(FalconError::Execution)?
+                                    {
+                                        // WHERE false — skip this conflict row
+                                    } else {
+                                        // WHERE true — proceed with update below
+                                        let mut new_values = existing_row.values.clone();
+                                        for (col_idx, expr) in assignments.iter() {
+                                            let val = ExprEngine::eval_row(expr, &combined_row)
+                                                .map_err(FalconError::Execution)?;
+                                            new_values[*col_idx] = val;
                                         }
+                                        Self::enforce_max_length(schema, &new_values)?;
+                                        for (i, val) in new_values.iter().enumerate() {
+                                            if i < schema.columns.len()
+                                                && val.is_null()
+                                                && !schema.columns[i].nullable
+                                            {
+                                                return Err(FalconError::Execution(
+                                                    ExecutionError::TypeError(format!(
+                                                        "NULL value in column '{}' violates NOT NULL constraint",
+                                                        schema.columns[i].name
+                                                    )),
+                                                ));
+                                            }
+                                        }
+                                        let check_row = OwnedRow::new(new_values);
+                                        self.eval_check_constraints(schema, &check_row)?;
+                                        let new_values = check_row.values;
+                                        self.apply_fk_on_update(schema, &existing_row, &new_values, txn)?;
+                                        let new_row = OwnedRow::new(new_values.clone());
+                                        self.storage.update(table_id, &pk, new_row, txn.txn_id)?;
+                                        if !returning.is_empty() {
+                                            let ret_row = OwnedRow::new(new_values);
+                                            let ret_vals: Vec<Datum> = returning
+                                                .iter()
+                                                .map(|(expr, _)| {
+                                                    ExprEngine::eval_row(expr, &ret_row)
+                                                        .map_err(FalconError::Execution)
+                                                })
+                                                .collect::<Result<Vec<_>, _>>()?;
+                                            returning_rows.push(ret_vals);
+                                        }
+                                        count += 1;
                                     }
-
+                                } else {
+                                    // No WHERE clause — always update
                                     let mut new_values = existing_row.values.clone();
-                                    for (col_idx, expr) in assignments {
+                                    for (col_idx, expr) in assignments.iter() {
                                         let val = ExprEngine::eval_row(expr, &combined_row)
                                             .map_err(FalconError::Execution)?;
                                         new_values[*col_idx] = val;
                                     }
-                                    // Enforce constraints on the updated row
                                     Self::enforce_max_length(schema, &new_values)?;
                                     for (i, val) in new_values.iter().enumerate() {
                                         if i < schema.columns.len()
@@ -754,18 +819,9 @@ impl Executor {
                                     let check_row = OwnedRow::new(new_values);
                                     self.eval_check_constraints(schema, &check_row)?;
                                     let new_values = check_row.values;
-
-                                    // UNIQUE enforcement delegated to storage.update() via
-                                    // check_unique_indexes() — no O(N) pre-scan needed here.
-
-                                    self.apply_fk_on_update(
-                                        schema,
-                                        existing_row,
-                                        &new_values,
-                                        txn,
-                                    )?;
+                                    self.apply_fk_on_update(schema, &existing_row, &new_values, txn)?;
                                     let new_row = OwnedRow::new(new_values.clone());
-                                    self.storage.update(table_id, pk, new_row, txn.txn_id)?;
+                                    self.storage.update(table_id, &pk, new_row, txn.txn_id)?;
                                     if !returning.is_empty() {
                                         let ret_row = OwnedRow::new(new_values);
                                         let ret_vals: Vec<Datum> = returning
@@ -778,9 +834,9 @@ impl Executor {
                                         returning_rows.push(ret_vals);
                                     }
                                     count += 1;
-                                    break;
                                 }
                             }
+                            // If existing_row is None, concurrent delete — skip silently
                         }
                         None => {
                             return Err(falcon_common::error::StorageError::DuplicateKey.into());
@@ -1103,6 +1159,20 @@ impl Executor {
                         .index_scan(table_id, col_idx, &key, txn.txn_id, read_ts)?,
                     remaining,
                 )
+            } else if effective_where.is_some()
+                && !effective_where.as_ref().is_some_and(|f| Self::expr_has_outer_ref(f))
+            {
+                // O6: Predicate pushdown into storage — filter applied row-by-row
+                // during scan, avoiding full table materialization for UPDATE.
+                let f = effective_where.unwrap();
+                let rows = self.storage.scan_with_filter(
+                    table_id,
+                    txn.txn_id,
+                    read_ts,
+                    |row| crate::expr_engine::ExprEngine::eval_filter(f, row).unwrap_or(false),
+                    None,
+                )?;
+                (rows, None) // filter already applied
             } else {
                 (
                     self.storage.scan(table_id, txn.txn_id, read_ts)?,
@@ -1113,15 +1183,37 @@ impl Executor {
         let mat_filter = self.materialize_filter(effective_filter.as_ref(), txn)?;
         let mut returning_rows = Vec::new();
 
-        // Pre-scan all rows once for UNIQUE constraint checks (avoid per-row O(n) rescan)
-        // Use current_ts to catch concurrent committed conflicts beyond txn start snapshot
-        let all_rows_for_uniq = if !schema.unique_constraints.is_empty() {
-            Some(
-                self.storage
-                    .scan(table_id, txn.txn_id, self.txn_mgr.current_ts())?,
-            )
-        } else {
-            None
+        // O3: Pre-build HashSet per UNIQUE constraint for O(1) conflict lookups.
+        // Maps (unique_constraint_idx → HashSet<(unique_vals)> with associated PK).
+        // Uses current_ts to catch concurrent committed conflicts beyond txn start snapshot.
+        let mut uniq_sets: Vec<std::collections::HashMap<Vec<Datum>, Vec<u8>>> =
+            if !schema.unique_constraints.is_empty() {
+                let existing = self.storage.scan(table_id, txn.txn_id, self.txn_mgr.current_ts())?;
+                schema
+                    .unique_constraints
+                    .iter()
+                    .map(|uniq_cols| {
+                        let mut set = std::collections::HashMap::new();
+                        for (pk, row) in &existing {
+                            let vals: Vec<Datum> = uniq_cols.iter().map(|&idx| row.values[idx].clone()).collect();
+                            if vals.iter().any(|v| v.is_null()) {
+                                continue;
+                            }
+                            set.insert(vals, pk.clone());
+                        }
+                        set
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+        // O8: Hoist trigger check outside the per-row loop — one get_catalog() per statement
+        let has_update_row_triggers = {
+            use falcon_common::schema::{TriggerEvent, TriggerLevel};
+            let cat = self.storage.get_catalog();
+            cat.triggers_for_table(&schema.name).iter()
+                .any(|t| t.enabled && t.events.contains(&TriggerEvent::Update) && t.level == TriggerLevel::Row)
         };
 
         for (pk, row) in &rows {
@@ -1157,52 +1249,43 @@ impl Executor {
             self.eval_check_constraints(schema, &check_row)?;
             let new_values = check_row.values;
 
-            // Enforce UNIQUE constraints on updated row
-            if let Some(ref all_rows) = all_rows_for_uniq {
-                for uniq_cols in &schema.unique_constraints {
-                    let new_vals: Vec<&Datum> =
-                        uniq_cols.iter().map(|&idx| &new_values[idx]).collect();
-                    if new_vals.iter().any(|v| v.is_null()) {
-                        continue;
-                    }
-                    for (other_pk, other_row) in all_rows {
-                        if other_pk == pk {
-                            continue;
-                        } // skip self
-                        let other_vals: Vec<&Datum> = uniq_cols
+            // O3: Enforce UNIQUE constraints via O(1) HashMap lookup
+            for (ui, uniq_cols) in schema.unique_constraints.iter().enumerate() {
+                let new_vals: Vec<Datum> =
+                    uniq_cols.iter().map(|&idx| new_values[idx].clone()).collect();
+                if new_vals.iter().any(|v| v.is_null()) {
+                    continue;
+                }
+                if let Some(existing_pk) = uniq_sets[ui].get(&new_vals) {
+                    if existing_pk != pk {
+                        let col_names: Vec<&str> = uniq_cols
                             .iter()
-                            .map(|&idx| &other_row.values[idx])
+                            .map(|&idx| schema.columns[idx].name.as_str())
                             .collect();
-                        if new_vals == other_vals {
-                            let col_names: Vec<&str> = uniq_cols
-                                .iter()
-                                .map(|&idx| schema.columns[idx].name.as_str())
-                                .collect();
-                            return Err(FalconError::Execution(ExecutionError::TypeError(
-                                format!(
-                                    "UNIQUE constraint violated on column(s): {}",
-                                    col_names.join(", ")
-                                ),
-                            )));
-                        }
+                        return Err(FalconError::Execution(ExecutionError::TypeError(
+                            format!(
+                                "UNIQUE constraint violated on column(s): {}",
+                                col_names.join(", ")
+                            ),
+                        )));
                     }
                 }
+                // Update the set: remove old vals, insert new vals
+                let old_vals: Vec<Datum> =
+                    uniq_cols.iter().map(|&idx| row.values[idx].clone()).collect();
+                uniq_sets[ui].remove(&old_vals);
+                uniq_sets[ui].insert(new_vals, pk.clone());
             }
 
             // Apply FK cascading actions for child tables if referenced columns changed
             self.apply_fk_on_update(schema, row, &new_values, txn)?;
 
-            let row_trigger_vars = {
-                use falcon_common::schema::{TriggerEvent, TriggerLevel};
-                let cat = self.storage.get_catalog();
-                let needs = cat.triggers_for_table(&schema.name).iter()
-                    .any(|t| t.enabled && t.events.contains(&TriggerEvent::Update) && t.level == TriggerLevel::Row);
-                if needs {
-                    let new_row_tmp = OwnedRow::new(new_values.clone());
-                    Some(Self::build_update_row_vars(schema, row, &new_row_tmp))
-                } else {
-                    None
-                }
+            // O8: Use pre-hoisted trigger check (computed once before the loop)
+            let row_trigger_vars = if has_update_row_triggers {
+                let new_row_tmp = OwnedRow::new(new_values.clone());
+                Some(Self::build_update_row_vars(schema, row, &new_row_tmp))
+            } else {
+                None
             };
             if let Some(ref rv) = row_trigger_vars {
                 use falcon_common::schema::{TriggerEvent, TriggerTiming};
@@ -1303,6 +1386,20 @@ impl Executor {
                         .index_scan(table_id, col_idx, &key, txn.txn_id, read_ts)?,
                     remaining,
                 )
+            } else if effective_where.is_some()
+                && !effective_where.as_ref().is_some_and(|f| Self::expr_has_outer_ref(f))
+            {
+                // O6: Predicate pushdown into storage — filter applied row-by-row
+                // during scan, avoiding full table materialization for DELETE.
+                let f = effective_where.unwrap();
+                let rows = self.storage.scan_with_filter(
+                    table_id,
+                    txn.txn_id,
+                    read_ts,
+                    |row| crate::expr_engine::ExprEngine::eval_filter(f, row).unwrap_or(false),
+                    None,
+                )?;
+                (rows, None) // filter already applied
             } else {
                 (
                     self.storage.scan(table_id, txn.txn_id, read_ts)?,

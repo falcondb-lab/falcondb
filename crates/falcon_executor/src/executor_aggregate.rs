@@ -904,6 +904,15 @@ impl Executor {
             }
         }
 
+        // O4: Track GROUP BY hash map memory in QueryGovernor
+        {
+            let group_bytes = group_map.iter()
+                .map(|(k, _)| k.len() + 64)
+                .sum::<usize>() as u64;
+            self.query_governor.record_memory(group_bytes)?;
+            self.query_governor.check_timeout()?;
+        }
+
         // Compute aggregates per group — reuse a single Vec buffer across groups
         let mut result_rows: Vec<OwnedRow> = Vec::with_capacity(group_indices.len());
         let mut group_rows: Vec<&OwnedRow> = Vec::new();
