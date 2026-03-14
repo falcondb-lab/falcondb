@@ -58,6 +58,7 @@ pub enum PlanKind {
     NestedLoopJoin,
     HashJoin,
     MergeSortJoin,
+    IndexNestedLoopJoin,
     Other,
 }
 
@@ -70,6 +71,7 @@ impl PlanKind {
             PhysicalPlan::NestedLoopJoin { .. } => PlanKind::NestedLoopJoin,
             PhysicalPlan::HashJoin { .. } => PlanKind::HashJoin,
             PhysicalPlan::MergeSortJoin { .. } => PlanKind::MergeSortJoin,
+            PhysicalPlan::IndexNestedLoopJoin { .. } => PlanKind::IndexNestedLoopJoin,
             _ => PlanKind::Other,
         }
     }
@@ -83,7 +85,8 @@ impl PlanKind {
             PlanKind::NestedLoopJoin => 3,
             PlanKind::HashJoin => 4,
             PlanKind::MergeSortJoin => 5,
-            PlanKind::Other => 6,
+            PlanKind::IndexNestedLoopJoin => 6,
+            PlanKind::Other => 7,
         }
     }
 }
@@ -711,7 +714,8 @@ pub fn extract_features_from_physical(plan: &PhysicalPlan) -> FeatureVec {
         }
         PhysicalPlan::HashJoin { joins, .. }
         | PhysicalPlan::NestedLoopJoin { joins, .. }
-        | PhysicalPlan::MergeSortJoin { joins, .. } => {
+        | PhysicalPlan::MergeSortJoin { joins, .. }
+        | PhysicalPlan::IndexNestedLoopJoin { joins, .. } => {
             f[1] = joins.len() as f64;
         }
         _ => {}

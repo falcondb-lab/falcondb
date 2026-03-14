@@ -321,6 +321,9 @@ pub struct Executor {
     /// Stores compiled `PhysicalPlan`s keyed by user-assigned name.
     /// `PREPARE p AS ...` stores a plan; `EXECUTE p(...)` retrieves and binds it.
     pub prepared_stmts: parking_lot::Mutex<crate::prepared_stmt::PreparedStatementCache>,
+    /// Per-query resource governor — enforces max_rows, max_memory, timeout.
+    /// Created per-session with configurable limits.
+    pub query_governor: Arc<crate::governor::QueryGovernor>,
 }
 
 impl Executor {
@@ -348,6 +351,7 @@ impl Executor {
             generic_plan_cache: GenericPlanCache::new(),
             table_handle_cache: DashMap::new(),
             prepared_stmts: parking_lot::Mutex::new(crate::prepared_stmt::PreparedStatementCache::new()),
+            query_governor: crate::governor::QueryGovernor::default_limits(),
         }
     }
 
@@ -376,6 +380,7 @@ impl Executor {
             generic_plan_cache: GenericPlanCache::new(),
             table_handle_cache: DashMap::new(),
             prepared_stmts: parking_lot::Mutex::new(crate::prepared_stmt::PreparedStatementCache::new()),
+            query_governor: crate::governor::QueryGovernor::default_limits(),
         }
     }
 
@@ -747,6 +752,7 @@ impl Executor {
                 | PhysicalPlan::HashJoin { .. }
                 | PhysicalPlan::NestedLoopJoin { .. }
                 | PhysicalPlan::MergeSortJoin { .. }
+                | PhysicalPlan::IndexNestedLoopJoin { .. }
         )
     }
 
@@ -1452,6 +1458,45 @@ impl Executor {
                 })?;
                 let cte_data = self.materialize_ctes(ctes, txn)?;
                 let mut result = self.exec_merge_sort_join(
+                    *left_table_id,
+                    left_schema,
+                    joins,
+                    combined_schema,
+                    projections,
+                    *visible_projection_count,
+                    filter.as_ref(),
+                    order_by,
+                    *limit,
+                    *offset,
+                    distinct,
+                    txn,
+                    &cte_data,
+                )?;
+                if !unions.is_empty() {
+                    result = self.exec_union(result, unions, txn)?;
+                }
+                Ok(result)
+            }
+            PhysicalPlan::IndexNestedLoopJoin {
+                left_table_id,
+                left_schema,
+                joins,
+                combined_schema,
+                projections,
+                visible_projection_count,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                ctes,
+                unions,
+            } => {
+                let txn = txn.ok_or_else(|| {
+                    FalconError::Internal("SELECT requires active transaction".into())
+                })?;
+                let cte_data = self.materialize_ctes(ctes, txn)?;
+                let mut result = self.exec_index_nested_loop_join(
                     *left_table_id,
                     left_schema,
                     joins,
@@ -3485,10 +3530,26 @@ impl Executor {
                 distinct,
                 unions,
                 ..
+            }
+            | PhysicalPlan::IndexNestedLoopJoin {
+                left_table_id,
+                left_schema,
+                joins,
+                projections,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                unions,
+                ..
             } => {
                 let is_hash = matches!(plan, PhysicalPlan::HashJoin { .. });
                 let is_merge = matches!(plan, PhysicalPlan::MergeSortJoin { .. });
-                let strategy = if is_merge {
+                let is_inl = matches!(plan, PhysicalPlan::IndexNestedLoopJoin { .. });
+                let strategy = if is_inl {
+                    "Index Nested Loop"
+                } else if is_merge {
                     "Merge Sort Join"
                 } else if is_hash {
                     "Hash Join"

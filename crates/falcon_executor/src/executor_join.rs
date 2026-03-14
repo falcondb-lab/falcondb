@@ -1135,4 +1135,201 @@ impl Executor {
         }
         true
     }
+
+    /// Index Nested Loop Join: for each left row, probe right side via
+    /// secondary index (or PK) instead of scanning all right rows.
+    /// O(N·logM) where N = |left|, M = |right|.
+    ///
+    /// Falls back to hash join when the right table has no usable index
+    /// on the equi-join key column.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_index_nested_loop_join(
+        &self,
+        left_table_id: falcon_common::types::TableId,
+        left_schema: &TableSchema,
+        joins: &[BoundJoin],
+        combined_schema: &TableSchema,
+        projections: &[BoundProjection],
+        visible_projection_count: usize,
+        filter: Option<&BoundExpr>,
+        order_by: &[BoundOrderBy],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        distinct: &DistinctMode,
+        txn: &TxnHandle,
+        cte_data: &CteData,
+    ) -> Result<ExecutionResult, FalconError> {
+        use falcon_storage::memtable::encode_column_value;
+
+        let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+        let mat_filter = self.materialize_filter(filter, txn)?;
+
+        // Scan left table
+        let left_data: Vec<OwnedRow> = if let Some(cte_rows) = cte_data.get(&left_table_id) {
+            cte_rows.clone()
+        } else {
+            self.storage
+                .scan_rows_only(left_table_id, txn.txn_id, read_ts)?
+        };
+
+        let mut combined_rows: Vec<OwnedRow> = left_data;
+
+        for join in joins {
+            let left_width = combined_rows.first().map_or(0, |r| r.values.len());
+            let key_pairs = Self::extract_equi_key_pairs(join.condition.as_ref(), left_width);
+
+            if key_pairs.is_empty() {
+                // No equi-join keys — fall back to nested loop for this join step
+                let right_data: Vec<OwnedRow> =
+                    if let Some(cte_rows) = cte_data.get(&join.right_table_id) {
+                        cte_rows.clone()
+                    } else {
+                        self.storage
+                            .scan_rows_only(join.right_table_id, txn.txn_id, read_ts)?
+                    };
+                let mut new_combined = Vec::new();
+                for left_row in &combined_rows {
+                    for right_row in &right_data {
+                        let merged = self.merge_rows(left_row, right_row);
+                        if let Some(ref cond) = join.condition {
+                            if !ExprEngine::eval_filter(cond, &merged)
+                                .map_err(FalconError::Execution)?
+                            {
+                                continue;
+                            }
+                        }
+                        new_combined.push(merged);
+                    }
+                }
+                combined_rows = new_combined;
+                continue;
+            }
+
+            // Pick the first right-side key column for index probing.
+            let (_left_key_col, right_key_col) = key_pairs[0];
+            // Adjust right key column index: the equi-key extraction returns
+            // combined-schema indices; subtract left_width to get right-local index.
+            let right_local_col = right_key_col.saturating_sub(left_width);
+
+            // Check if right_local_col is the PK (column 0) for PK lookup.
+            let is_pk_lookup = join.right_schema.primary_key_columns.contains(&right_local_col);
+
+            let right_width = join.right_schema.columns.len();
+            let null_right = OwnedRow::new(vec![Datum::Null; right_width]);
+            let null_left = OwnedRow::new(vec![Datum::Null; left_width]);
+
+            let mut new_combined = Vec::new();
+
+            // For right/full outer: track which right rows were matched.
+            // We only need this for Right/FullOuter joins. To get right PKs,
+            // we scan once if needed.
+            let needs_right_outer =
+                matches!(join.join_type, JoinType::Right | JoinType::FullOuter);
+            let right_all: Option<Vec<OwnedRow>> = if needs_right_outer {
+                Some(
+                    if let Some(cte_rows) = cte_data.get(&join.right_table_id) {
+                        cte_rows.clone()
+                    } else {
+                        self.storage
+                            .scan_rows_only(join.right_table_id, txn.txn_id, read_ts)?
+                    },
+                )
+            } else {
+                None
+            };
+            let mut right_matched_pks: std::collections::HashSet<Vec<u8>> =
+                std::collections::HashSet::new();
+
+            let left_key_col = key_pairs[0].0;
+
+            for left_row in &combined_rows {
+                // Extract the join key value from the left row.
+                let key_datum = left_row.get(left_key_col).cloned().unwrap_or(Datum::Null);
+                if key_datum == Datum::Null {
+                    // NULL never matches — emit null-extended for outer joins.
+                    if matches!(join.join_type, JoinType::Left | JoinType::FullOuter) {
+                        new_combined.push(self.merge_rows(left_row, &null_right));
+                    }
+                    continue;
+                }
+
+                // Probe the right side using index or PK.
+                let right_rows: Vec<(Vec<u8>, OwnedRow)> = if is_pk_lookup {
+                    let pk_bytes = encode_column_value(&key_datum);
+                    match self
+                        .storage
+                        .get(join.right_table_id, &pk_bytes, txn.txn_id, read_ts)?
+                    {
+                        Some(row) => vec![(pk_bytes, row)],
+                        None => vec![],
+                    }
+                } else {
+                    let key_bytes = encode_column_value(&key_datum);
+                    self.storage.index_scan(
+                        join.right_table_id,
+                        right_local_col,
+                        &key_bytes,
+                        txn.txn_id,
+                        read_ts,
+                    )?
+                };
+
+                let mut matched = false;
+                for (pk, right_row) in &right_rows {
+                    let merged = self.merge_rows(left_row, right_row);
+                    // Evaluate residual join condition (non-equi parts).
+                    if let Some(ref cond) = join.condition {
+                        if !ExprEngine::eval_filter(cond, &merged)
+                            .map_err(FalconError::Execution)?
+                        {
+                            continue;
+                        }
+                    }
+                    matched = true;
+                    if needs_right_outer {
+                        right_matched_pks.insert(pk.clone());
+                    }
+                    new_combined.push(merged);
+                }
+
+                if !matched
+                    && matches!(join.join_type, JoinType::Left | JoinType::FullOuter)
+                {
+                    new_combined.push(self.merge_rows(left_row, &null_right));
+                }
+            }
+
+            // Right/FullOuter: emit unmatched right rows.
+            if let Some(ref all_right) = right_all {
+                if matches!(join.join_type, JoinType::Right | JoinType::FullOuter) {
+                    // Re-scan right to find unmatched rows
+                    let right_scan = self.storage.scan(
+                        join.right_table_id,
+                        txn.txn_id,
+                        read_ts,
+                    )?;
+                    for (pk, right_row) in &right_scan {
+                        if !right_matched_pks.contains(pk) {
+                            new_combined.push(self.merge_rows(&null_left, right_row));
+                        }
+                    }
+                }
+                let _ = all_right; // suppress unused warning
+            }
+
+            combined_rows = new_combined;
+        }
+
+        self.finish_join_pipeline(
+            combined_rows,
+            mat_filter,
+            projections,
+            visible_projection_count,
+            combined_schema,
+            distinct,
+            order_by,
+            limit,
+            offset,
+        )
+    }
 }

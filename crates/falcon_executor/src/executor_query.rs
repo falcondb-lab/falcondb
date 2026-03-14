@@ -1138,6 +1138,31 @@ impl Executor {
                         filter.cloned(),
                     ),
                 }
+            } else if filter.is_some()
+                && limit.is_some()
+                && order_by.is_empty()
+                && matches!(distinct, DistinctMode::None)
+                && !has_window
+                && !has_agg
+                && group_by.is_empty()
+                && !filter.as_ref().is_some_and(|f| Self::expr_has_outer_ref(f))
+            {
+                // ── Pipeline: predicate+limit pushdown into storage ──────────
+                // Avoids materializing the entire table; storage applies the
+                // filter row-by-row and stops after `limit+offset` matches.
+                let f = filter.unwrap();
+                let pushdown_limit = limit.unwrap().saturating_add(offset.unwrap_or(0));
+                let read_ts = txn.read_ts(self.txn_mgr.current_ts());
+                self.txn_mgr.register_ssi_read(txn, table_id.0);
+                let rows = self.storage.scan_with_filter(
+                    table_id,
+                    txn.txn_id,
+                    read_ts,
+                    |row| ExprEngine::eval_filter(f, row).unwrap_or(false),
+                    Some(pushdown_limit),
+                )?;
+                // Filter already applied — no residual needed.
+                (rows, None)
             } else {
                 let read_ts = txn.read_ts(self.txn_mgr.current_ts());
                 self.txn_mgr.register_ssi_read(txn, table_id.0);
@@ -1146,6 +1171,17 @@ impl Executor {
                     filter.cloned(),
                 )
             };
+
+        // ── Per-query memory budget enforcement ─────────────────────────────
+        // Estimate scan materialization cost and check governor limits.
+        {
+            let scan_bytes = raw_rows
+                .iter()
+                .map(|(pk, row)| pk.len() + row.values.len() * 16 + 64)
+                .sum::<usize>() as u64;
+            self.query_governor.record_memory(scan_bytes)?;
+            self.query_governor.check_timeout()?;
+        }
 
         // ── RLS USING expression enforcement ─────────────────────────────────
         // If the table has RLS enabled with SELECT-applicable USING expressions,

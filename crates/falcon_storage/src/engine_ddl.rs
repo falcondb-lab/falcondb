@@ -753,6 +753,23 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Drop all temporary tables (session-scoped cleanup on disconnect).
+    /// Returns the names of tables that were dropped.
+    pub fn drop_temp_tables(&self) -> Vec<String> {
+        let catalog = self.catalog.read();
+        let temp_names: Vec<String> = catalog
+            .list_tables()
+            .into_iter()
+            .filter(|t| t.is_temporary)
+            .map(|t| t.name.clone())
+            .collect();
+        drop(catalog);
+        for name in &temp_names {
+            let _ = self.drop_table(name);
+        }
+        temp_names
+    }
+
     /// Truncate a table — remove all rows but keep the schema.
     pub fn truncate_table(&self, name: &str) -> Result<(), StorageError> {
         let catalog = self.catalog.read();

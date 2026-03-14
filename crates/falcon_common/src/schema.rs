@@ -211,6 +211,10 @@ pub struct TableSchema {
     /// None = table is not partitioned.
     #[serde(default)]
     pub partition_spec: Option<TablePartitionSpec>,
+    /// Whether this is a session-scoped temporary table (CREATE TEMPORARY TABLE).
+    /// Temporary tables are invisible to other sessions and auto-dropped on disconnect.
+    #[serde(default)]
+    pub is_temporary: bool,
 }
 
 /// Referential action for foreign key ON DELETE / ON UPDATE.
@@ -389,6 +393,7 @@ impl Default for TableSchema {
             dynamic_defaults: std::collections::HashMap::new(),
             generated_columns: std::collections::HashMap::new(),
             partition_spec: None,
+            is_temporary: false,
         }
     }
 }

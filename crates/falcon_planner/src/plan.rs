@@ -725,6 +725,13 @@ impl PhysicalPlan {
                 ctes,
                 unions,
                 ..
+            }
+            | Self::IndexNestedLoopJoin {
+                left_table_id,
+                joins,
+                ctes,
+                unions,
+                ..
             } => {
                 table_ids.insert(*left_table_id);
                 for join in joins {

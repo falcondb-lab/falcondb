@@ -358,6 +358,8 @@ pub struct BoundCreateTable {
     pub if_not_exists: bool,
     /// Set when the table has a PARTITION BY clause.
     pub partition_spec: Option<BoundPartitionSpec>,
+    /// Session-scoped temporary table (CREATE TEMPORARY TABLE).
+    pub is_temporary: bool,
 }
 
 #[derive(Debug, Clone)]

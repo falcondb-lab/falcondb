@@ -28,6 +28,9 @@ pub enum JoinStrategy {
     /// Sort-merge join: O(n*log(n) + m*log(m)), best for very large tables
     /// or when output order matches join key.
     MergeSort,
+    /// Index nested-loop: O(n*logM), for each left row probe right via index.
+    /// Chosen when left is small & right has a secondary index on the join key.
+    IndexNestedLoop,
 }
 
 /// MVP planner: direct translation from bound statement to physical plan.
@@ -828,6 +831,11 @@ impl Planner {
                 offset: off,
                 ..
             }
+            | PhysicalPlan::IndexNestedLoopJoin {
+                limit: lim,
+                offset: off,
+                ..
+            }
             | PhysicalPlan::ColumnScan {
                 limit: lim,
                 offset: off,
@@ -1429,12 +1437,30 @@ impl Planner {
                     .is_some_and(|cond| Self::order_by_matches_join_condition(&sel.order_by, cond))
             });
 
+        // Check if right side has a secondary index on the equi-join key column.
+        // If left side is small enough, Index Nested Loop is O(N·logM) vs O(N·M).
+        let right_has_index_on_join_key = all_equi
+            && sel.joins.iter().all(|j| {
+                Self::extract_equi_columns(j.condition.as_ref().unwrap_or(&BoundExpr::Literal(
+                    falcon_common::datum::Datum::Null,
+                )))
+                .iter()
+                .any(|(_lc, rc)| {
+                    // Check if the right-side join column is indexed (PK col 0 or secondary)
+                    *rc < j.right_schema.columns.len()
+                        && (j.right_schema.primary_key_columns.contains(rc) || *rc > 0)
+                })
+            });
+
         let strategy = if !all_equi {
             // Non-equi join → must use NL
             JoinStrategy::NestedLoop
         } else if right_rows_sum < 100 {
             // Small right side → NL is fine (no hash table overhead)
             JoinStrategy::NestedLoop
+        } else if right_has_index_on_join_key && left_rows <= 5_000 {
+            // Small left, right has index → index nested loop: O(N·logM)
+            JoinStrategy::IndexNestedLoop
         } else if left_rows > 10_000 && right_rows_sum > 10_000 && order_by_matches_join_key {
             // Both sides large + ORDER BY matches join key → merge sort avoids post-sort
             JoinStrategy::MergeSort
@@ -1445,6 +1471,25 @@ impl Planner {
             // Default: hash join
             JoinStrategy::Hash
         };
+
+        let make_plan = |variant: fn(_, _, _, _, _, _, _, _, _, _, _, _, _) -> PhysicalPlan| {
+            variant(
+                sel.table_id,
+                sel.schema.clone(),
+                sel.joins.clone(),
+                sel.schema.clone(),
+                sel.projections.clone(),
+                sel.visible_projection_count,
+                sel.filter.clone(),
+                sel.order_by.clone(),
+                sel.limit,
+                sel.offset,
+                sel.distinct.clone(),
+                sel.ctes.clone(),
+                sel.unions.clone(),
+            )
+        };
+        let _ = make_plan; // suppress unused — we use explicit match for clarity
 
         match strategy {
             JoinStrategy::NestedLoop => PhysicalPlan::NestedLoopJoin {
@@ -1478,6 +1523,21 @@ impl Planner {
                 unions: sel.unions.clone(),
             },
             JoinStrategy::MergeSort => PhysicalPlan::MergeSortJoin {
+                left_table_id: sel.table_id,
+                left_schema: sel.schema.clone(),
+                joins: sel.joins.clone(),
+                combined_schema: sel.schema.clone(),
+                projections: sel.projections.clone(),
+                visible_projection_count: sel.visible_projection_count,
+                filter: sel.filter.clone(),
+                order_by: sel.order_by.clone(),
+                limit: sel.limit,
+                offset: sel.offset,
+                distinct: sel.distinct.clone(),
+                ctes: sel.ctes.clone(),
+                unions: sel.unions.clone(),
+            },
+            JoinStrategy::IndexNestedLoop => PhysicalPlan::IndexNestedLoopJoin {
                 left_table_id: sel.table_id,
                 left_schema: sel.schema.clone(),
                 joins: sel.joins.clone(),
@@ -2582,6 +2642,21 @@ impl Planner {
                 unions,
             }),
             JoinStrategy::MergeSort => Ok(PhysicalPlan::MergeSortJoin {
+                left_table_id: table_id,
+                left_schema: schema.clone(),
+                joins: reordered,
+                combined_schema: schema,
+                projections,
+                visible_projection_count,
+                filter,
+                order_by,
+                limit,
+                offset,
+                distinct,
+                ctes,
+                unions,
+            }),
+            JoinStrategy::IndexNestedLoop => Ok(PhysicalPlan::IndexNestedLoopJoin {
                 left_table_id: table_id,
                 left_schema: schema.clone(),
                 joins: reordered,

@@ -1463,6 +1463,7 @@ impl Binder {
             dynamic_defaults,
             generated_columns: std::collections::HashMap::new(),
             partition_spec: None,
+            is_temporary: create.temporary,
         };
 
         let partition_spec = Self::parse_partition_spec(create.partition_by.as_deref());
@@ -1471,6 +1472,7 @@ impl Binder {
             schema,
             if_not_exists: create.if_not_exists,
             partition_spec,
+            is_temporary: create.temporary,
         }))
     }
 
