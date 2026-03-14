@@ -237,6 +237,25 @@ pub enum PhysicalPlan {
         ctes: Vec<BoundCte>,
         unions: Vec<(BoundSelect, SetOpKind, bool)>,
     },
+    /// Query with index nested-loop join: for each left row, probe the right
+    /// table via a secondary index (or PK) instead of scanning all rows.
+    /// O(N·logM) instead of O(N·M).  Chosen when the right side has an index
+    /// on the equi-join column and the left side is small.
+    IndexNestedLoopJoin {
+        left_table_id: TableId,
+        left_schema: TableSchema,
+        joins: Vec<BoundJoin>,
+        combined_schema: TableSchema,
+        projections: Vec<BoundProjection>,
+        visible_projection_count: usize,
+        filter: Option<BoundExpr>,
+        order_by: Vec<BoundOrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        distinct: DistinctMode,
+        ctes: Vec<BoundCte>,
+        unions: Vec<(BoundSelect, SetOpKind, bool)>,
+    },
     /// EXPLAIN: wraps another plan to show its structure
     Explain(Box<Self>),
     /// EXPLAIN ANALYZE: executes the inner plan and shows actual metrics

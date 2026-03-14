@@ -1707,28 +1707,38 @@ impl Executor {
     }
 
     /// Register row-level locks for FOR UPDATE / FOR SHARE.
-    /// Under OCC, FOR UPDATE adds scanned PKs to the write-set so concurrent
-    /// writers to the same rows will conflict at commit time.
+    ///
+    /// - **FOR UPDATE**: acquires an Exclusive pessimistic row lock on each
+    ///   scanned PK via `TxnManager::acquire_row_lock`, then adds the PK to
+    ///   the write-set for OCC conflict detection.  This blocks concurrent
+    ///   writers until the transaction commits or aborts.
+    /// - **FOR SHARE**: acquires a Share pessimistic row lock.  Multiple
+    ///   readers can hold Share simultaneously, but Exclusive writers block.
+    /// - **None**: no-op.
     pub(crate) fn register_row_locks(
         &self,
         table_id: TableId,
         for_lock: &RowLockMode,
         txn: &TxnHandle,
     ) -> Result<(), FalconError> {
-        match for_lock {
+        let lock_mode = match for_lock {
             RowLockMode::None => return Ok(()),
-            RowLockMode::Share(_) => {
-                // FOR SHARE: rows are already in the read-set from the scan,
-                // validated under SI/Serializable at commit.
-                return Ok(());
-            }
-            RowLockMode::Update(_wait) => {}
-        }
-        // FOR UPDATE: add scanned PKs to write-set for OCC conflict detection
+            RowLockMode::Update(_) => falcon_txn::LockMode::Exclusive,
+            RowLockMode::Share(_) => falcon_txn::LockMode::Share,
+        };
+
         let read_ts = txn.read_ts(self.txn_mgr.current_ts());
         let rows = self.storage.scan(table_id, txn.txn_id, read_ts)?;
         for (pk, _row) in &rows {
-            if !pk.is_empty() {
+            if pk.is_empty() {
+                continue;
+            }
+            // Acquire pessimistic row lock (blocks or aborts via Wound-Wait).
+            self.txn_mgr
+                .acquire_row_lock(txn.txn_id, table_id, pk.clone(), lock_mode, None)
+                .map_err(FalconError::Txn)?;
+            // FOR UPDATE also adds to write-set for OCC validation at commit.
+            if matches!(for_lock, RowLockMode::Update(_)) {
                 self.storage.record_write(txn.txn_id, table_id, pk.clone());
             }
         }

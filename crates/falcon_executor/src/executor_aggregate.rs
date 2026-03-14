@@ -822,20 +822,32 @@ impl Executor {
     ) -> Result<ExecutionResult, FalconError> {
         let filter_has_correlated_sub = filter.is_some_and(Self::expr_has_outer_ref);
 
-        // Filter first (WHERE)
+        // Filter first (WHERE) — use parallel_filter for large non-correlated scans.
         let mut filtered: Vec<&OwnedRow> = Vec::new();
-        for (_pk, row) in raw_rows {
-            if let Some(f) = filter {
-                if filter_has_correlated_sub {
+        if let Some(f) = filter {
+            if filter_has_correlated_sub {
+                for (_pk, row) in raw_rows {
                     let row_filter = self.materialize_correlated(f, row, txn)?;
-                    if !ExprEngine::eval_filter(&row_filter, row).map_err(FalconError::Execution)? {
-                        continue;
+                    if ExprEngine::eval_filter(&row_filter, row).map_err(FalconError::Execution)? {
+                        filtered.push(row);
                     }
-                } else if !ExprEngine::eval_filter(f, row).map_err(FalconError::Execution)? {
-                    continue;
+                }
+            } else if self.parallel_config.should_parallelize(raw_rows.len()) {
+                let matched = crate::parallel::parallel_filter(raw_rows, f, &self.parallel_config);
+                for idx in matched {
+                    filtered.push(&raw_rows[idx].1);
+                }
+            } else {
+                for (_pk, row) in raw_rows {
+                    if ExprEngine::eval_filter(f, row).map_err(FalconError::Execution)? {
+                        filtered.push(row);
+                    }
                 }
             }
-            filtered.push(row);
+        } else {
+            for (_pk, row) in raw_rows {
+                filtered.push(row);
+            }
         }
 
         let columns = self.resolve_output_columns(projections, schema);
