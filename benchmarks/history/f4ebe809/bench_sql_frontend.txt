@@ -1,0 +1,139 @@
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m log v0.4.29
+[1m[92m  Downloaded[0m sqlparser_derive v0.2.2
+[1m[92m  Downloaded[0m sqlparser v0.50.0
+[1m[92m   Compiling[0m getrandom v0.3.4
+[1m[92m   Compiling[0m tempfile v3.27.0
+[1m[92m   Compiling[0m ppv-lite86 v0.2.21
+[1m[92m   Compiling[0m sqlparser_derive v0.2.2
+[1m[92m   Compiling[0m rand_core v0.9.5
+[1m[92m   Compiling[0m wait-timeout v0.2.1
+[1m[92m   Compiling[0m log v0.4.29
+[1m[92m   Compiling[0m rusty-fork v0.3.1
+[1m[33mwarning[0m[1m: unused import: `std::cmp::Ordering`[0m
+   [1m[94m--> [0mcrates/falcon_common/src/schema.rs:351:9
+    [1m[94m|[0m
+[1m[94m351[0m [1m[94m|[0m     use std::cmp::Ordering;
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: unused import: `std::hash::Hasher`[0m
+   [1m[94m--> [0mcrates/falcon_common/src/schema.rs:374:9
+    [1m[94m|[0m
+[1m[94m374[0m [1m[94m|[0m     use std::hash::Hasher as _;
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m: `falcon_common` (lib) generated 2 warnings (run `cargo fix --lib -p falcon_common` to apply 1 suggestion)
+[1m[92m   Compiling[0m rand_chacha v0.9.0
+[1m[92m   Compiling[0m rand_xorshift v0.4.0
+[1m[92m   Compiling[0m rand v0.9.2
+[1m[92m   Compiling[0m criterion v0.5.1
+[1m[92m   Compiling[0m proptest v1.10.0
+[1m[92m   Compiling[0m sqlparser v0.50.0
+[1m[92m   Compiling[0m falcon_sql_frontend v1.2.0 (/home/runner/work/falcondb/falcondb/crates/falcon_sql_frontend)
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+   [1m[94m--> [0mcrates/falcon_sql_frontend/src/normalize.rs:936:17
+    [1m[94m|[0m
+[1m[94m936[0m [1m[94m|[0m                 ColumnDef {
+    [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+   [1m[94m--> [0mcrates/falcon_sql_frontend/src/normalize.rs:946:17
+    [1m[94m|[0m
+[1m[94m946[0m [1m[94m|[0m                 ColumnDef {
+    [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+   [1m[94m--> [0mcrates/falcon_sql_frontend/src/normalize.rs:956:17
+    [1m[94m|[0m
+[1m[94m956[0m [1m[94m|[0m                 ColumnDef {
+    [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+  [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:16:17
+   [1m[94m|[0m
+[1m[94m16[0m [1m[94m|[0m                 ColumnDef {
+   [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+  [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:26:17
+   [1m[94m|[0m
+[1m[94m26[0m [1m[94m|[0m                 ColumnDef {
+   [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+  [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:36:17
+   [1m[94m|[0m
+[1m[94m36[0m [1m[94m|[0m                 ColumnDef {
+   [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+   [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:536:17
+    [1m[94m|[0m
+[1m[94m536[0m [1m[94m|[0m                 ColumnDef {
+    [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+   [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:546:17
+    [1m[94m|[0m
+[1m[94m546[0m [1m[94m|[0m                 ColumnDef {
+    [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+   [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:855:17
+    [1m[94m|[0m
+[1m[94m855[0m [1m[94m|[0m                 ColumnDef {
+    [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+   [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:865:17
+    [1m[94m|[0m
+[1m[94m865[0m [1m[94m|[0m                 ColumnDef {
+    [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+   [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:875:17
+    [1m[94m|[0m
+[1m[94m875[0m [1m[94m|[0m                 ColumnDef {
+    [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+    [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:1224:17
+     [1m[94m|[0m
+[1m[94m1224[0m [1m[94m|[0m                 ColumnDef {
+     [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+    [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:1234:17
+     [1m[94m|[0m
+[1m[94m1234[0m [1m[94m|[0m                 ColumnDef {
+     [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+    [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:1244:17
+     [1m[94m|[0m
+[1m[94m1244[0m [1m[94m|[0m                 ColumnDef {
+     [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+    [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:1830:17
+     [1m[94m|[0m
+[1m[94m1830[0m [1m[94m|[0m                 ColumnDef {
+     [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+    [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:1840:17
+     [1m[94m|[0m
+[1m[94m1840[0m [1m[94m|[0m                 ColumnDef {
+     [1m[94m|[0m                 [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1m[91merror[E0063][0m[1m: missing field `generated` in initializer of `falcon_common::schema::ColumnDef`[0m
+    [1m[94m--> [0mcrates/falcon_sql_frontend/src/tests.rs:1880:27
+     [1m[94m|[0m
+[1m[94m1880[0m [1m[94m|[0m             columns: vec![ColumnDef {
+     [1m[94m|[0m                           [1m[91m^^^^^^^^^[0m [1m[91mmissing `generated`[0m
+
+[1mFor more information about this error, try `rustc --explain E0063`.[0m
+[1m[91merror[0m: could not compile `falcon_sql_frontend` (lib test) due to 17 previous errors
+[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
