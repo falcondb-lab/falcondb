@@ -29,6 +29,22 @@ pub mod sharding;
 pub mod stability_hardening;
 pub mod two_phase;
 
+// ── CockroachDB gap-fill modules (C1-C8) ────────────────────────────────
+/// C3: Centralized Timestamp Oracle — global monotonic timestamp source.
+pub mod tso;
+/// C1: Follower Read — route stale reads to replicas via closed_ts.
+pub mod follower_read;
+/// C4: Parallel 2PC — concurrent prepare/commit across shards.
+pub mod parallel_2pc;
+/// C2: Range/Tablet automatic split — hot-spot driven shard splitting.
+pub mod range_split;
+/// C5: Distributed SSI — cross-shard rw-antidependency detection.
+pub mod distributed_ssi;
+/// C6: Read Restart — uncertainty-interval retry protocol.
+pub mod read_restart;
+/// C8: Node Liveness — epoch-fenced write admission to prevent split-brain.
+pub mod node_liveness;
+
 // ── Hardening & safety modules ──────────────────────────────────────────
 pub mod circuit_breaker;
 pub mod dist_hardening;
@@ -230,6 +246,32 @@ pub use smart_gateway::{
     JdbcConnectionUrl, RequestClassification, RouteDecision, SeedGatewayList, SmartGateway,
     SmartGatewayConfig, SmartGatewayMetrics, SmartGatewayMetricsSnapshot, TopologyCache,
     TopologyCacheMetrics, TopologyCacheMetricsSnapshot, TopologyEntry, WalMode,
+};
+
+// ── C1-C8 CockroachDB gap-fill exports ──────────────────────────────────────
+pub use tso::{TsoBatch, TsoClient, TsoClientMetrics, TsoServer, TsoServerMetrics, TsoStatsSnapshot};
+pub use follower_read::{
+    FollowerReadConfig, FollowerReadMetrics, FollowerReadMetricsSnapshot, FollowerReadRouter,
+    FollowerReadReject, ReadRoute, ReplicaEntry, ReplicaRegistry,
+};
+pub use parallel_2pc::{
+    Parallel2PcCoordinator, Parallel2PcMetrics, Parallel2PcResult, ParallelShardResult,
+};
+pub use range_split::{
+    QpsCounter, ShardHotspotMetrics, ShardSplitter, SplitConfig, SplitDecision, SplitMetrics,
+    SplitMetricsSnapshot, SplitMonitor, SplitPolicy, SplitResult, SplitTrigger,
+};
+pub use distributed_ssi::{
+    DistPredicate, DistSsiMetrics, DistSsiMetricsSnapshot, DistWriteIntent,
+    DistributedSsiRegistry,
+};
+pub use read_restart::{
+    ReadAttemptOutcome, ReadRestartConfig, ReadRestartError, ReadRestartExhausted,
+    ReadRestartGuard, ReadRestartMetrics, ReadRestartMetricsSnapshot, UncertaintyChecker,
+};
+pub use node_liveness::{
+    LivenessConfig, LivenessRecord, LivenessStore, NodeLivenessManager, WriteEpochGate,
+    WriteEpochMetrics, WriteEpochMetricsSnapshot, WriteRejectionReason,
 };
 pub use stability_hardening::{
     CommitPhase, CommitPhaseMetrics, CommitPhaseTracker, DefensiveValidator,
